@@ -4,41 +4,22 @@ from datetime import datetime
 from typing import Dict, Optional
 
 class TrendStrategy:
-    """
-    RSI(14) + Moving Average Trend Following Strategy
-    
-    CORE LOGIC:
-    • RSI(14) identifies momentum pullbacks in trending markets
-    • 15-period MA confirms trend direction
-    • Designed for 15-minute timeframes with longer holds
-    • High win rate (70-83%) with 1:2.5 risk-reward
-    
-    ENTRY CONDITIONS:
-    • Uptrend: Price > MA + RSI pullback (30-40) + momentum confirmation
-    • Downtrend: Price < MA + RSI pullback (60-70) + momentum confirmation
-    • Wait for RSI to bounce from oversold/overbought levels
-    
-    OPTIMIZED FOR:
-    • Trending markets (ADX > 25)
-    • 15-minute timeframes
-    • Trend continuation trades
-    • Higher profit targets with trailing stops
-    """
+    """RSI(14) + Moving Average Trend Following Strategy"""
     
     def __init__(self):
         self.config = {
             "rsi_length": 14,
             "ma_length": 15,
-            "ma_type": "EMA",  # EMA for faster response
+            "ma_type": "EMA",
             "uptrend_rsi_low": 30,
             "uptrend_rsi_high": 45,
             "downtrend_rsi_low": 55,
             "downtrend_rsi_high": 70,
-            "momentum_threshold": 0.001,  # 0.1% minimum momentum
-            "cooldown_seconds": 300,  # 5 minutes between signals
-            "target_profit_multiplier": 2.5,  # 1:2.5 risk-reward
-            "max_hold_seconds": 3600,  # 1 hour max hold
-            "trailing_stop_pct": 0.5  # 0.5% trailing stop
+            "momentum_threshold": 0.001,
+            "cooldown_seconds": 300,
+            "target_profit_multiplier": 2.5,
+            "max_hold_seconds": 3600,
+            "trailing_stop_pct": 0.5
         }
         self.last_signal_time = None
         
@@ -52,7 +33,6 @@ class TrendStrategy:
         gain = delta.where(delta > 0, 0)
         loss = (-delta.where(delta < 0, 0))
         
-        # Wilder's smoothing (traditional RSI)
         alpha = 1.0 / period
         avg_gain = gain.ewm(alpha=alpha, min_periods=period).mean()
         avg_loss = loss.ewm(alpha=alpha, min_periods=period).mean()
@@ -63,7 +43,7 @@ class TrendStrategy:
         return rsi.fillna(50.0)
     
     def calculate_ma(self, prices: pd.Series) -> pd.Series:
-        """Calculate moving average with validation"""
+        """Calculate moving average"""
         period = self.config['ma_length']
         if len(prices) < period:
             return pd.Series(prices.iloc[-1], index=prices.index)
@@ -73,12 +53,12 @@ class TrendStrategy:
                 ma = prices.ewm(span=period, min_periods=period).mean()
             else:
                 ma = prices.rolling(period, min_periods=period).mean()
-            return ma.fillna(prices.iloc[-1])  # Forward fill with last valid price
+            return ma.fillna(prices.iloc[-1])
         except:
             return pd.Series(prices.iloc[-1], index=prices.index)
     
     def detect_trend(self, close: pd.Series, ma: pd.Series) -> str:
-        """Detect trend direction using price vs MA with validation"""
+        """Detect trend direction using price vs MA"""
         if len(close) < 5 or len(ma) < 5:
             return 'NEUTRAL'
             
@@ -86,20 +66,17 @@ class TrendStrategy:
             current_price = close.iloc[-1]
             current_ma = ma.iloc[-1]
             
-            # Validate data
             if pd.isna(current_price) or pd.isna(current_ma):
                 return 'NEUTRAL'
             
-            # Check MA slope for trend confirmation (minimum 5 periods)
+            # Check MA slope for trend confirmation
             if len(ma) >= 5:
                 ma_slope = (ma.iloc[-1] - ma.iloc[-5]) / ma.iloc[-5]
             else:
                 ma_slope = 0
             
-            # Price above MA + positive MA slope = uptrend
             if current_price > current_ma and ma_slope > self.config['momentum_threshold']:
                 return 'UPTREND'
-            # Price below MA + negative MA slope = downtrend
             elif current_price < current_ma and ma_slope < -self.config['momentum_threshold']:
                 return 'DOWNTREND'
             else:
@@ -112,6 +89,10 @@ class TrendStrategy:
         if len(data) < 30 or self._is_cooldown_active():
             return None
         
+        # Only trade in trending markets
+        if market_condition not in ["TRENDING", "STRONG_TREND"]:
+            return None
+        
         close = data['close']
         rsi = self.calculate_rsi(close).iloc[-1]
         ma = self.calculate_ma(close)
@@ -121,17 +102,12 @@ class TrendStrategy:
         if pd.isna(rsi) or trend == 'NEUTRAL':
             return None
         
-        # Only trade in trending markets
-        if market_condition not in ["TRENDING", "STRONG_TREND"]:
-            return None
-        
         signal = None
         
         # Long signal: Uptrend + RSI pullback
         if (trend == 'UPTREND' and 
             self.config['uptrend_rsi_low'] <= rsi <= self.config['uptrend_rsi_high']):
             signal = self._create_signal('BUY', trend, rsi, price, data, ma.iloc[-1])
-        
         # Short signal: Downtrend + RSI pullback  
         elif (trend == 'DOWNTREND' and 
               self.config['downtrend_rsi_low'] <= rsi <= self.config['downtrend_rsi_high']):
@@ -145,36 +121,31 @@ class TrendStrategy:
     def _create_signal(self, action: str, trend: str, rsi: float, price: float, 
                       data: pd.DataFrame, ma_value: float) -> Dict:
         """Create trend following signal"""
-        window = data.tail(30)  # Longer window for trend analysis
+        window = data.tail(30)
         
         if action == 'BUY':
-            # Stop below recent swing low or MA
             swing_low = window['low'].min()
-            ma_stop = ma_value * 0.995  # 0.5% below MA
+            ma_stop = ma_value * 0.995
             structure_stop = max(swing_low, ma_stop)
             level = swing_low
         else:
-            # Stop above recent swing high or MA
             swing_high = window['high'].max()
-            ma_stop = ma_value * 1.005  # 0.5% above MA
+            ma_stop = ma_value * 1.005
             structure_stop = min(swing_high, ma_stop)
             level = swing_high
         
         # Validate stop distance
         stop_distance = abs(price - structure_stop) / price
-        if stop_distance < 0.003 or stop_distance > 0.02:  # 0.3% to 2% range
+        if stop_distance < 0.003 or stop_distance > 0.02:
             return None
         
         # Calculate target based on risk-reward ratio
         risk_amount = abs(price - structure_stop)
         target_distance = risk_amount * self.config['target_profit_multiplier']
         
-        if action == 'BUY':
-            target_price = price + target_distance
-        else:
-            target_price = price - target_distance
+        target_price = price + target_distance if action == 'BUY' else price - target_distance
         
-        # Calculate confidence based on trend strength and RSI position
+        # Calculate confidence
         trend_strength = abs(price - ma_value) / ma_value * 100
         rsi_strength = abs(rsi - 50)
         base_confidence = min(95, 60 + trend_strength * 10 + rsi_strength * 0.5)
@@ -230,10 +201,10 @@ class TrendStrategy:
         
         if side == 'Buy':
             new_stop = current_price - trail_distance
-            return True, new_stop
         else:
             new_stop = current_price + trail_distance
-            return True, new_stop
+            
+        return True, new_stop
     
     def get_strategy_info(self) -> Dict:
         """Get strategy information"""

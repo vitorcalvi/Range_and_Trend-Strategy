@@ -4,36 +4,17 @@ from datetime import datetime
 from typing import Dict, Optional
 
 class RangeStrategy:
-    """
-    RSI+MFI Range-Bound Strategy - Optimized for sideways markets
-    
-    CORE LOGIC:
-    • RSI identifies price momentum extremes in ranging conditions
-    • MFI confirms with volume-weighted analysis
-    • Fast periods (3-5) for quick scalping signals
-    • Designed for 1-minute timeframes with 60-180 second holds
-    
-    ENTRY CONDITIONS:
-    • Strong Range: RSI ≤ 50 + MFI ≤ 50 (neutral reversions)
-    • Weak Range: RSI ≤ 40 + MFI ≤ 35 (oversold reversions)
-    • Very aggressive thresholds for stress testing
-    
-    OPTIMIZED FOR:
-    • Range-bound markets (ADX < 25)
-    • 1-minute scalping
-    • Quick profit targets ($15 USDT)
-    • Mean reversion behavior
-    """
+    """RSI+MFI Range-Bound Strategy for sideways markets"""
     
     def __init__(self):
         self.config = {
             "rsi_length": 5,
             "mfi_length": 5,
-            "oversold_weak": 40,      # Weak range oversold
-            "oversold_strong": 50,    # Strong range oversold  
-            "mfi_threshold_weak": 35, # Weak range MFI
-            "mfi_threshold_strong": 50, # Strong range MFI
-            "overbought": 60,         # Range overbought level
+            "oversold_weak": 40,
+            "oversold_strong": 50,
+            "mfi_threshold_weak": 35,
+            "mfi_threshold_strong": 50,
+            "overbought": 60,
             "cooldown_seconds": 0.5,
             "target_profit_usdt": 15,
             "max_hold_seconds": 180
@@ -82,7 +63,7 @@ class RangeStrategy:
         return mfi.fillna(50.0).clip(15, 85)
     
     def generate_signal(self, data: pd.DataFrame, market_condition: str) -> Optional[Dict]:
-        """Generate range trading signals based on market condition"""
+        """Generate range trading signals"""
         if len(data) < 20 or self._is_cooldown_active():
             return None
         
@@ -93,22 +74,20 @@ class RangeStrategy:
         if pd.isna(rsi) or pd.isna(mfi):
             return None
         
-        # Adjust thresholds based on range strength
+        # Get thresholds based on market condition
         if market_condition == "STRONG_RANGE":
             oversold_level = self.config['oversold_strong']
             mfi_level = self.config['mfi_threshold_strong']
-        else:  # WEAK_RANGE
+        else:
             oversold_level = self.config['oversold_weak']
             mfi_level = self.config['mfi_threshold_weak']
         
-        # Generate signals for range-bound conditions
         signal = None
         
         # Long signal: Mean reversion from oversold
         if rsi <= oversold_level and mfi <= mfi_level:
             signal = self._create_signal('BUY', rsi, mfi, price, data, market_condition)
-        
-        # Short signal: Mean reversion from overbought (very conservative in ranges)
+        # Short signal: Mean reversion from overbought
         elif rsi >= self.config['overbought'] and mfi >= self.config['mfi_threshold_strong']:
             signal = self._create_signal('SELL', rsi, mfi, price, data, market_condition)
         
@@ -123,15 +102,13 @@ class RangeStrategy:
         window = data.tail(20)
         
         if action == 'BUY':
-            # Support-based stop for range longs
             structure_stop = window['low'].min() * 0.9985
             level = window['low'].min()
         else:
-            # Resistance-based stop for range shorts
             structure_stop = window['high'].max() * 1.0015
             level = window['high'].max()
         
-        # Validate stop distance for scalping
+        # Validate stop distance
         stop_distance = abs(price - structure_stop) / price
         if stop_distance < 0.0005 or stop_distance > 0.005:
             return None
@@ -141,7 +118,6 @@ class RangeStrategy:
         mfi_strength = abs(50 - mfi)
         base_confidence = (rsi_strength + mfi_strength) * 1.5
         
-        # Boost confidence for strong range conditions
         if market_condition == "STRONG_RANGE":
             base_confidence *= 1.1
         

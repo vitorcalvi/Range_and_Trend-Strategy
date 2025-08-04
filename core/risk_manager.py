@@ -5,28 +5,12 @@ from typing import Tuple, Dict, Any
 load_dotenv()
 
 class RiskManager:
-    """
-    Dual Strategy Risk Manager
-    
-    Manages risk for both Range and Trend strategies with adaptive parameters:
-    
-    RANGE STRATEGY (1-minute scalping):
-    - Fixed position: $9091 USDT 
-    - Quick profit targets: $15 USDT
-    - Fast exits: 180 seconds max
-    - Tight stops: 0.6% emergency
-    
-    TREND STRATEGY (15-minute following):
-    - Larger positions: $12,000-15,000 USDT
-    - Higher profit targets: 1:2.5 RR
-    - Longer holds: 3600 seconds max
-    - Trailing stops: 0.5% trail
-    """
+    """Dual Strategy Risk Manager"""
 
     def __init__(self):
         self.symbol = os.getenv('TRADING_SYMBOL')
         
-        # Range strategy config (original scalping)
+        # Strategy configurations
         self.range_config = {
             'fixed_position_usdt': 9091,
             'profit_threshold_usdt': 15,
@@ -35,7 +19,6 @@ class RiskManager:
             'leverage': 10
         }
         
-        # Trend strategy config (new trend following)
         self.trend_config = {
             'fixed_position_usdt': 12000,
             'risk_reward_ratio': 2.5,
@@ -46,30 +29,23 @@ class RiskManager:
             'leverage': 10
         }
         
-        # Current active configuration
         self.active_config = self.range_config
         self.active_strategy = "RANGE"
     
     def set_strategy(self, strategy_type: str):
-        """Set active strategy configuration with validation"""
+        """Set active strategy configuration"""
         if strategy_type not in ["RANGE", "TREND"]:
-            print(f"⚠️ Unknown strategy type: {strategy_type}, defaulting to RANGE")
             strategy_type = "RANGE"
             
-        if strategy_type == "RANGE":
-            self.active_config = self.range_config.copy()
-        else:  # TREND
-            self.active_config = self.trend_config.copy()
-            
+        self.active_config = (self.range_config if strategy_type == "RANGE" 
+                             else self.trend_config).copy()
         self.active_strategy = strategy_type
-        print(f"🛡️ Risk Manager switched to {strategy_type} strategy")
     
     def validate_trade(self, signal: Dict[str, Any], balance: float, current_price: float) -> Tuple[bool, str]:
         """Validate trade with strategy-specific rules"""
         if not signal or not signal.get('action') or not signal.get('structure_stop'):
             return False, "Invalid signal"
         
-        # Basic validation
         if balance <= 0 or current_price <= 0:
             return False, "Invalid market data"
         
@@ -77,17 +53,15 @@ class RiskManager:
         stop_distance = abs(current_price - signal['structure_stop']) / current_price
         
         if self.active_strategy == "RANGE":
-            # Tight stops for scalping
             if stop_distance < 0.0005 or stop_distance > 0.005:
                 return False, "Invalid stop distance for range strategy"
         else:  # TREND
-            # Wider stops for trend following
             if stop_distance < 0.003 or stop_distance > 0.02:
                 return False, "Invalid stop distance for trend strategy"
         
         # Position size validation
         max_position = min(self.active_config['fixed_position_usdt'], balance * 0.8)
-        if max_position < 100:  # Minimum position size
+        if max_position < 100:
             return False, "Insufficient balance"
         
         return True, "Valid"
@@ -97,20 +71,16 @@ class RiskManager:
         if balance <= 0 or entry_price <= 0 or stop_price <= 0:
             return 0
         
-        # Get position sizing parameters
         max_position_usdt = min(self.active_config['fixed_position_usdt'], balance * 0.5)
         
         if self.active_strategy == "RANGE":
-            # Fixed size for scalping
             position_size = max_position_usdt / entry_price
         else:  # TREND
-            # Risk-based sizing for trend following
             risk_per_trade = balance * 0.02  # 2% risk per trade
             stop_distance = abs(entry_price - stop_price)
             
             if stop_distance > 0:
                 position_size = risk_per_trade / stop_distance
-                # Cap at maximum position size
                 max_size = max_position_usdt / entry_price
                 position_size = min(position_size, max_size)
             else:
@@ -120,33 +90,30 @@ class RiskManager:
     
     def should_close_position(self, current_price: float, entry_price: float, side: str, 
                              unrealized_pnl: float, position_age_seconds: float) -> Tuple[bool, str]:
-        """Determine if position should be closed with strategy-specific logic"""
-        
+        """Determine if position should be closed"""
         if entry_price <= 0:
             return False, "hold"
         
-        # Emergency stop (applies to both strategies)
+        # Emergency stop
         pnl_pct = unrealized_pnl / entry_price if entry_price > 0 else 0
         if pnl_pct <= -self.active_config['emergency_stop_pct']:
             return True, "emergency_stop"
         
-        # Max hold time (strategy-specific)
+        # Max hold time
         if position_age_seconds >= self.active_config['max_position_time']:
             return True, "max_hold_time"
         
-        # Strategy-specific exit logic
+        # Strategy-specific exits
         if self.active_strategy == "RANGE":
             return self._check_range_exits(unrealized_pnl, position_age_seconds)
         else:  # TREND
             return self._check_trend_exits(current_price, entry_price, side, unrealized_pnl, position_age_seconds)
     
     def _check_range_exits(self, unrealized_pnl: float, position_age_seconds: float) -> Tuple[bool, str]:
-        """Range strategy specific exits - quick scalping"""
-        # Quick profit target
+        """Range strategy specific exits"""
         if unrealized_pnl >= self.range_config['profit_threshold_usdt']:
             return True, "profit_target"
         
-        # Early exit if holding too long without profit
         if position_age_seconds >= 120 and unrealized_pnl <= 0:
             return True, "timeout_no_profit"
         
@@ -154,22 +121,14 @@ class RiskManager:
     
     def _check_trend_exits(self, current_price: float, entry_price: float, side: str, 
                           unrealized_pnl: float, position_age_seconds: float) -> Tuple[bool, str]:
-        """Trend strategy specific exits - trailing and profit locking"""
-        
-        # Profit lock threshold (lock in profits after good run)
+        """Trend strategy specific exits"""
         if unrealized_pnl > 0:
-            profit_ratio = unrealized_pnl / (entry_price * 0.02)  # Relative to 2% risk
+            profit_ratio = unrealized_pnl / (entry_price * 0.02)
             
             if profit_ratio >= self.trend_config['profit_lock_threshold']:
-                # Could implement trailing stop logic here
-                # For now, use simple profit target
                 target_profit = entry_price * 0.02 * self.trend_config['risk_reward_ratio']
                 if unrealized_pnl >= target_profit:
                     return True, "profit_target"
-        
-        # Time-based exits for trends
-        if position_age_seconds >= self.trend_config['max_position_time']:
-            return True, "max_hold_time"
         
         return False, "hold"
     
@@ -230,30 +189,25 @@ class RiskManager:
         }
     
     def adapt_to_market_condition(self, market_condition: str, volatility: str):
-        """Adapt risk parameters based on market conditions with validation"""
+        """Adapt risk parameters based on market conditions"""
         try:
-            # Ensure we have the base config
-            if self.active_strategy == "RANGE":
-                base_config = self.range_config.copy()
-            else:
-                base_config = self.trend_config.copy()
+            base_config = (self.range_config if self.active_strategy == "RANGE" 
+                          else self.trend_config).copy()
             
             # Calculate volatility multiplier
-            volatility_multiplier = 1.0
             if volatility == "HIGH_VOL":
-                volatility_multiplier = 0.7  # Smaller positions in high volatility
+                volatility_multiplier = 0.7
             elif volatility == "LOW_VOL":
-                volatility_multiplier = 1.2  # Larger positions in low volatility
+                volatility_multiplier = 1.2
+            else:
+                volatility_multiplier = 1.0
             
-            # Apply volatility adjustment to position sizing
+            # Apply volatility adjustment
             self.active_config = base_config.copy()
             original_size = self.active_config['fixed_position_usdt']
             self.active_config['fixed_position_usdt'] = int(original_size * volatility_multiplier)
             
-            print(f"📊 Adapted to {market_condition} + {volatility}: Position ${original_size} → ${self.active_config['fixed_position_usdt']}")
-            
-        except Exception as e:
-            print(f"❌ Error adapting to market conditions: {e}")
+        except Exception:
             # Reset to base config on error
             if self.active_strategy == "RANGE":
                 self.active_config = self.range_config.copy()

@@ -11,7 +11,7 @@ from strategies.strategy_manager import StrategyManager
 from strategies.range_strategy import RangeStrategy  
 from strategies.trend_strategy import TrendStrategy
 from core.risk_manager import RiskManager
-from core.telegram_notifier import TelegramNotifier
+from utils.telegram_notifier import TelegramNotifier
 
 load_dotenv()
 
@@ -36,15 +36,15 @@ class TradeEngine:
         self.position = None
         self.position_start_time = None
         
-        # Market data - dual timeframe
+        # Market data
         self.price_data_1m = pd.DataFrame()
         self.price_data_15m = pd.DataFrame()
         
-        # Performance tracking
+        # State tracking
         self.trade_id = 0
         self.active_strategy = None
         self.market_info = {}
-        self.successful_entries = 0  # Track successful position entries
+        self.successful_entries = 0
         
         # Performance tracking
         self.exit_reasons = {
@@ -90,7 +90,7 @@ class TradeEngine:
             return f"{qty:.3f}"
     
     async def run_cycle(self):
-        """Run one trading cycle with dual strategy support"""
+        """Run one trading cycle"""
         if not await self._update_market_data():
             return
         
@@ -105,83 +105,54 @@ class TradeEngine:
         self._display_status()
     
     async def _update_market_data(self):
-        """Update both 1m and 15m market data with validation"""
+        """Update both 1m and 15m market data"""
         try:
-            # Fetch 1-minute data
+            # Fetch data
             klines_1m = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="1", limit=200)
-            if klines_1m.get('retCode') != 0:
-                print(f"❌ Failed to fetch 1m data: {klines_1m.get('retMsg', 'Unknown error')}")
+            klines_15m = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="15", limit=100)
+            
+            if klines_1m.get('retCode') != 0 or klines_15m.get('retCode') != 0:
                 return False
             
             self.price_data_1m = self._process_kline_data(klines_1m['result']['list'])
-            
-            # Fetch 15-minute data
-            klines_15m = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="15", limit=100)
-            if klines_15m.get('retCode') != 0:
-                print(f"❌ Failed to fetch 15m data: {klines_15m.get('retMsg', 'Unknown error')}")
-                return False
-            
             self.price_data_15m = self._process_kline_data(klines_15m['result']['list'])
             
             # Validate data quality
-            data_valid = (len(self.price_data_1m) > 50 and 
-                         len(self.price_data_15m) > 30 and
-                         not self.price_data_1m['close'].isna().any() and
-                         not self.price_data_15m['close'].isna().any())
-            
-            if not data_valid:
-                print(f"🔍 Data validation failed - 1m: {len(self.price_data_1m)}, 15m: {len(self.price_data_15m)}")
-                print(f"🔍 1m NaN check: {self.price_data_1m['close'].isna().sum()}, 15m NaN: {self.price_data_15m['close'].isna().sum()}")
-            
-            return data_valid
-        except Exception as e:
-            print(f"❌ Market data update error: {str(e)}")
+            return (len(self.price_data_1m) > 50 and 
+                   len(self.price_data_15m) > 30 and
+                   not self.price_data_1m['close'].isna().any() and
+                   not self.price_data_15m['close'].isna().any())
+        except:
             return False
     
     def _process_kline_data(self, kline_list):
-        """Process kline data into DataFrame with validation"""
+        """Process kline data into DataFrame"""
         try:
             if not kline_list:
-                print("❌ Empty kline data received")
                 return pd.DataFrame()
                 
             df = pd.DataFrame(kline_list, columns=[
                 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
             ])
             
-            # Validate we have data
             if df.empty:
-                print("❌ Empty DataFrame after processing klines")
                 return df
             
-            # Convert timestamp
+            # Convert and validate data
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
-            
-            # Convert price and volume columns to numeric
             numeric_cols = ['open', 'high', 'low', 'close', 'volume']
             for col in numeric_cols:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             
-            # Check for NaN values after conversion
-            nan_counts = df[numeric_cols].isna().sum()
-            if nan_counts.any():
-                print(f"⚠️ NaN values detected after conversion: {dict(nan_counts[nan_counts > 0])}")
-                # Forward fill NaN values
-                df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].iloc[-1])
+            # Forward fill any NaN values
+            df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].iloc[-1])
             
-            # Sort by timestamp and set as index
+            # Sort and set index
             df = df.sort_values('timestamp').set_index('timestamp')
             
-            # Final validation
-            if df.empty or len(df) == 0:
-                print("❌ No valid data after processing")
-                return pd.DataFrame()
+            return df if not df.empty else pd.DataFrame()
             
-            print(f"✅ Processed {len(df)} candles, latest: {df.index[-1]}")
-            return df
-            
-        except Exception as e:
-            print(f"❌ Error processing kline data: {str(e)}")
+        except:
             return pd.DataFrame()
     
     async def _generate_and_execute_signal(self):
@@ -193,11 +164,11 @@ class TradeEngine:
         
         self.market_info = market_info
         
-        # Check for strategy switch
+        # Handle strategy switch
         if self.active_strategy and self.active_strategy != strategy_type:
             await self._on_strategy_switch(self.active_strategy, strategy_type)
         
-        # Synchronize risk manager with active strategy
+        # Synchronize risk manager
         if self.active_strategy != strategy_type:
             self.risk_manager.set_strategy(strategy_type)
             self.risk_manager.adapt_to_market_condition(
@@ -207,44 +178,34 @@ class TradeEngine:
         
         self.active_strategy = strategy_type
         
-        # Generate signal using appropriate strategy
+        # Generate and execute signal
         signal = await self._generate_signal(strategy_type, market_info)
         
         if signal:
             self.rejections['total_signals'] += 1
-            # Validate signal before attempting execution
             if self._validate_signal(signal, market_info):
                 await self._execute_trade(signal, strategy_type, market_info)
-            else:
-                # Signal was generated but rejected during validation
-                pass
     
     async def _generate_signal(self, strategy_type, market_info):
         """Generate signal using the appropriate strategy"""
         try:
             if strategy_type == "RANGE":
-                data = self.price_data_1m
-                return self.range_strategy.generate_signal(data, market_info['condition'])
+                return self.range_strategy.generate_signal(self.price_data_1m, market_info['condition'])
             else:  # TREND
-                data = self.price_data_15m
-                return self.trend_strategy.generate_signal(data, market_info['condition'])
-        except Exception as e:
+                return self.trend_strategy.generate_signal(self.price_data_15m, market_info['condition'])
+        except:
             self.rejections['invalid_signal'] += 1
             return None
     
     async def _execute_trade(self, signal, strategy_type, market_info):
-        """Execute trade with enhanced validation"""
+        """Execute trade"""
         current_price = float(self.price_data_1m['close'].iloc[-1])
         balance = await self.get_account_balance()
         
-        if not balance:
+        if not balance or not self._validate_signal(signal, market_info):
             return
         
-        # Validate signal
-        if not self._validate_signal(signal, market_info):
-            return
-        
-        # Calculate position size with strategy-specific adjustments
+        # Calculate position size
         base_qty = self.risk_manager.calculate_position_size(balance, current_price, signal['structure_stop'])
         sizing_multiplier = self.strategy_manager.get_position_sizing_multiplier(strategy_type, market_info)
         qty = base_qty * sizing_multiplier
@@ -262,7 +223,7 @@ class TradeEngine:
             )
             
             if order.get('retCode') == 0:
-                self.successful_entries += 1  # Track successful entries
+                self.successful_entries += 1
                 self._log_trade("ENTRY", current_price, signal=signal, quantity=formatted_qty, strategy=strategy_type)
                 await self.notifier.send_trade_entry(signal, current_price, formatted_qty, self._get_strategy_info())
         except:
@@ -278,8 +239,7 @@ class TradeEngine:
             self.rejections['invalid_market'] += 1
             return False
         
-        confidence = signal.get('confidence', 0)
-        if confidence < 60:
+        if signal.get('confidence', 0) < 60:
             self.rejections['invalid_signal'] += 1
             return False
         
@@ -307,7 +267,7 @@ class TradeEngine:
             pass
     
     async def _check_position_exit(self):
-        """Check if position should be closed with strategy-specific logic"""
+        """Check if position should be closed"""
         if not self.position or not self.position_start_time:
             return
         
@@ -317,57 +277,16 @@ class TradeEngine:
         unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
         position_age = (datetime.now() - self.position_start_time).total_seconds()
         
-        # Check strategy-specific exit conditions
-        should_close, reason = await self._check_strategy_exit(current_price, entry_price, side, unrealized_pnl, position_age)
-        
-        if should_close:
-            await self._close_position(reason)
-    
-    async def _check_strategy_exit(self, current_price, entry_price, side, unrealized_pnl, position_age):
-        """Check exit conditions based on active strategy"""
-        # Ensure risk manager is synchronized with active strategy
+        # Ensure risk manager is synchronized
         if self.risk_manager.active_strategy != self.active_strategy:
             self.risk_manager.set_strategy(self.active_strategy)
         
-        # Basic risk management exits
-        basic_exit, basic_reason = self.risk_manager.should_close_position(
+        should_close, reason = self.risk_manager.should_close_position(
             current_price, entry_price, side, unrealized_pnl, position_age
         )
         
-        if basic_exit:
-            return True, basic_reason
-        
-        # Strategy-specific exits
-        if self.active_strategy == "TREND":
-            return await self._check_trend_exit(current_price, entry_price, side, unrealized_pnl)
-        else:
-            return await self._check_range_exit(current_price, entry_price, side, unrealized_pnl, position_age)
-    
-    async def _check_trend_exit(self, current_price, entry_price, side, unrealized_pnl):
-        """Trend strategy specific exits - trailing stops"""
-        if unrealized_pnl > 0:
-            should_trail, new_stop = self.trend_strategy.should_trail_stop(
-                entry_price, current_price, side, unrealized_pnl
-            )
-            if should_trail:
-                # Implement trailing stop logic here
-                pass
-        
-        return False, "hold"
-    
-    async def _check_range_exit(self, current_price, entry_price, side, unrealized_pnl, position_age):
-        """Range strategy specific exits - quick scalping exits"""
-        # Quick profit taking for range strategy
-        profit_threshold = self.range_strategy.config['target_profit_usdt']
-        max_hold = self.range_strategy.config['max_hold_seconds']
-        
-        if unrealized_pnl >= profit_threshold:
-            return True, "profit_target"
-        
-        if position_age >= max_hold:
-            return True, "max_hold_time"
-        
-        return False, "hold"
+        if should_close:
+            await self._close_position(reason)
     
     async def _close_position(self, reason="Manual"):
         """Close position"""
@@ -397,17 +316,13 @@ class TradeEngine:
             pass
     
     async def _on_strategy_switch(self, old_strategy, new_strategy):
-        """Handle strategy switch with proper synchronization"""
-        print(f"\n🔄 Strategy Switch: {old_strategy} → {new_strategy}")
-        
+        """Handle strategy switch"""
         try:
-            # Close position if strategy switch occurs
             if self.position:
-                print("📤 Closing position due to strategy switch...")
                 await self._close_position("strategy_switch")
                 
-                # Wait for position to close before continuing
-                max_wait = 5  # 5 seconds max wait
+                # Wait for position to close
+                max_wait = 5
                 wait_count = 0
                 while self.position and wait_count < max_wait:
                     await asyncio.sleep(1)
@@ -415,15 +330,10 @@ class TradeEngine:
                     wait_count += 1
                     
                 if self.position:
-                    print("⚠️ Position did not close cleanly, forcing reset")
                     self._reset_position()
             
-            # Update exit reasons tracking
             self.exit_reasons['strategy_switch'] += 1
-            
-        except Exception as e:
-            print(f"❌ Error during strategy switch: {e}")
-            # Force reset to prevent stuck states
+        except:
             self._reset_position()
     
     async def _on_position_closed(self):
@@ -447,7 +357,7 @@ class TradeEngine:
             self.exit_reasons['manual_exit'] += 1
     
     def _log_trade(self, action, price, **kwargs):
-        """Enhanced trade logging"""
+        """Log trade data"""
         timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
         
         if action == "ENTRY":
@@ -497,7 +407,7 @@ class TradeEngine:
             return self.trend_strategy.get_strategy_info()
     
     def _display_status(self):
-        """Display enhanced status with dual strategy info"""
+        """Display trading status"""
         try:
             price = float(self.price_data_1m['close'].iloc[-1])
             time = self.price_data_1m.index[-1].strftime('%H:%M:%S')
@@ -539,20 +449,8 @@ class TradeEngine:
             
             print(f"🔢 Total Trades: {total_trades:>3} │ 📈 Signals: {total_signals:>3} │ ✅ Accept Rate: {(total_trades/max(total_signals,1)*100):>4.1f}%")
             
-            # Adjust for active position (trade count should include open positions)
-            active_trades = total_trades + (1 if self.position else 0)
-            if total_signals > 0:
-                actual_accept_rate = (active_trades / total_signals) * 100
-                print(f"📊 Active Trades: {active_trades:>3} │ 🎯 Current Accept Rate: {actual_accept_rate:>4.1f}%")
-            
-            # Exit reasons
-            top_exits = sorted(self.exit_reasons.items(), key=lambda x: x[1], reverse=True)[:3]
-            if any(count > 0 for _, count in top_exits):
-                exit_str = " │ ".join([f"{reason}: {count}" for reason, count in top_exits if count > 0])
-                print(f"🏁 Top Exits: {exit_str}")
-            print("─"*w + "\n")
-            
             # Current status
+            print("─"*w + "\n")
             print(f"⏰ {time}   |   💰 ${price_formatted}")
             print()
             

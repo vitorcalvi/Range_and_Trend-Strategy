@@ -6,38 +6,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class TelegramNotifier:
-    """
-    Streamlined Telegram Notification System
-    
-    Handles:
-    - Trade entry/exit notifications
-    - Bot status updates
-    - Error handling and rate limiting
-    """
+    """Streamlined Telegram Notification System"""
     
     def __init__(self):
-        # Configuration
         self.bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
         self.symbol = os.getenv('TRADING_SYMBOL', 'ETHUSDT')
-        
-        # Check if notifications are enabled
         self.enabled = bool(self.bot_token and self.chat_id)
-        
-        # Request settings
         self.timeout = 10
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
     
     async def send_message(self, message: str) -> bool:
-        """
-        Send message to Telegram chat
-        
-        Args:
-            message: Message text to send
-            
-        Returns:
-            bool: True if sent successfully, False otherwise
-        """
+        """Send message to Telegram chat"""
         if not self.enabled:
             return False
         
@@ -53,36 +33,15 @@ class TelegramNotifier:
                 timeout=self.timeout
             )
             return response.status_code == 200
-            
-        except requests.exceptions.RequestException:
-            return False
-        except Exception:
+        except:
             return False
     
     async def send_trade_entry(self, signal_data, price, quantity, strategy_info):
-        """
-        Send trade entry notification
-        
-        Args:
-            signal_data: Signal dictionary with trade details
-            price: Entry price
-            quantity: Position quantity
-            strategy_info: Strategy information
-        """
-        # Determine trade direction
+        """Send trade entry notification"""
         action = signal_data.get('action', 'UNKNOWN')
         emoji = "🟢 LONG" if action == 'BUY' else "🔴 SHORT"
         
-        # Format message
-        message = self._format_entry_message(
-            emoji, signal_data, price, quantity
-        )
-        
-        await self.send_message(message)
-    
-    def _format_entry_message(self, emoji, signal_data, price, quantity):
-        """Format trade entry message"""
-        return f"""
+        message = f"""
 📥 <b>TRADE ENTRY</b> {emoji}
 
 <b>🔹 Symbol:</b> {self.symbol}
@@ -97,72 +56,39 @@ class TelegramNotifier:
 
 🕒 <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
 """
-    
-    async def send_trade_exit(self, exit_data, price, pnl, duration, strategy_info):
-        """
-        Send trade exit notification
-        
-        Args:
-            exit_data: Exit details dictionary
-            price: Exit price
-            pnl: Profit/Loss amount
-            duration: Trade duration in seconds
-            strategy_info: Strategy information
-        """
-        # Determine result
-        emoji = "🟢 WIN" if pnl >= 0 else "🔴 LOSS"
-        
-        # Format message
-        message = self._format_exit_message(
-            emoji, exit_data, price, pnl, duration
-        )
-        
         await self.send_message(message)
     
-    def _format_exit_message(self, emoji, exit_data, price, pnl, duration):
-        """Format trade exit message"""
-        # Format PnL
+    async def send_trade_exit(self, exit_data, price, pnl, duration, strategy_info):
+        """Send trade exit notification"""
+        emoji = "🟢 WIN" if pnl >= 0 else "🔴 LOSS"
         pnl_text = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-        
-        # Format duration
         duration_text = self._format_duration(duration)
+        trigger = exit_data.get('trigger', 'manual').replace('_', ' ').title()
         
-        # Format trigger reason
-        trigger = exit_data.get('trigger', 'manual')
-        trigger_text = trigger.replace('_', ' ').title()
-        
-        return f"""
+        message = f"""
 📤 <b>TRADE EXIT</b> {emoji}
 
 <b>🔹 Symbol:</b> {self.symbol}
 <b>💸 Exit Price:</b> ${price:.2f}
 <b>📊 PnL:</b> {pnl_text}
 <b>⏱ Duration:</b> {duration_text}
-<b>🎯 Trigger:</b> {trigger_text}
+<b>🎯 Trigger:</b> {trigger}
 
 🕒 <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
 """
+        await self.send_message(message)
     
     def _format_duration(self, duration_seconds):
         """Format duration in human-readable format"""
         if duration_seconds < 60:
             return f"{duration_seconds:.1f}s"
         elif duration_seconds < 3600:
-            minutes = duration_seconds / 60
-            return f"{minutes:.1f}m"
+            return f"{duration_seconds / 60:.1f}m"
         else:
-            hours = duration_seconds / 3600
-            return f"{hours:.1f}h"
+            return f"{duration_seconds / 3600:.1f}h"
     
     async def send_bot_status(self, status: str, message_text: str = ""):
-        """
-        Send bot status notification
-        
-        Args:
-            status: Status type ('started', 'stopped', 'error', 'warning')
-            message_text: Additional message text
-        """
-        # Status headlines
+        """Send bot status notification"""
         headlines = {
             'started': '🚀 BOT STARTED',
             'stopped': '🛑 BOT STOPPED',
@@ -171,18 +97,9 @@ class TelegramNotifier:
         }
         
         headline = headlines.get(status.lower(), '📊 BOT STATUS')
-        
-        # Format message
-        message = self._format_status_message(headline, message_text)
-        
-        await self.send_message(message)
-    
-    def _format_status_message(self, headline, message_text):
-        """Format bot status message"""
-        # Additional info line
         info_line = f"\n📝 <b>Info:</b> {message_text}" if message_text else ""
         
-        return f"""
+        message = f"""
 <b>{headline}</b>
 
 <b>🔹 Symbol:</b> {self.symbol}
@@ -190,15 +107,10 @@ class TelegramNotifier:
 
 🕒 <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
 """
+        await self.send_message(message)
     
     async def send_error_notification(self, error_type: str, error_message: str):
-        """
-        Send error notification with details
-        
-        Args:
-            error_type: Type of error
-            error_message: Error description
-        """
+        """Send error notification"""
         message = f"""
 ❌ <b>BOT ERROR</b>
 
@@ -208,19 +120,10 @@ class TelegramNotifier:
 
 🕒 <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
 """
-        
         await self.send_message(message)
     
-    async def send_performance_update(self, trades_count: int, success_rate: float, 
-                                    total_pnl: float):
-        """
-        Send performance summary notification
-        
-        Args:
-            trades_count: Number of trades executed
-            success_rate: Win rate percentage
-            total_pnl: Total profit/loss
-        """
+    async def send_performance_update(self, trades_count: int, success_rate: float, total_pnl: float):
+        """Send performance summary notification"""
         pnl_emoji = "📈" if total_pnl >= 0 else "📉"
         pnl_text = f"+${total_pnl:.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):.2f}"
         
@@ -234,7 +137,6 @@ class TelegramNotifier:
 
 🕒 <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
 """
-        
         await self.send_message(message)
     
     def is_enabled(self):
@@ -242,12 +144,7 @@ class TelegramNotifier:
         return self.enabled
     
     def get_config_status(self):
-        """
-        Get configuration status for debugging
-        
-        Returns:
-            dict: Configuration status
-        """
+        """Get configuration status for debugging"""
         return {
             'bot_token_configured': bool(self.bot_token),
             'chat_id_configured': bool(self.chat_id),
