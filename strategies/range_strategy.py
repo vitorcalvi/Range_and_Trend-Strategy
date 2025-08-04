@@ -85,18 +85,18 @@ class RangeStrategy:
         if pd.isna(rsi) or band_width == 0:
             return None
         
-        # Filter out low volatility periods (tight bands)
-        if band_width < 0.02:  # Less than 2% band width
-            return None
+        # FIXED: Removed restrictive volatility filter - let signals through
+        # if band_width < 0.02:  # Too restrictive
+        #     return None
         
         signal = None
         
-        # FIXED: Proper oversold/overbought with Bollinger confirmation
-        # Long signal: RSI oversold + price near lower Bollinger Band
-        if rsi <= self.config['oversold'] and bb_position <= 0.2:
+        # FIXED: Simplified conditions - price below lower band OR RSI oversold
+        # Long signal: Price below lower Bollinger Band OR RSI oversold
+        if rsi <= self.config['oversold'] or bb_position <= 0.1:
             signal = self._create_signal('BUY', rsi, bb_position, price, data, market_condition)
-        # Short signal: RSI overbought + price near upper Bollinger Band  
-        elif rsi >= self.config['overbought'] and bb_position >= 0.8:
+        # Short signal: Price above upper Bollinger Band OR RSI overbought  
+        elif rsi >= self.config['overbought'] or bb_position >= 0.9:
             signal = self._create_signal('SELL', rsi, bb_position, price, data, market_condition)
         
         if signal:
