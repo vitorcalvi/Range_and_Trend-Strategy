@@ -4,26 +4,24 @@ from datetime import datetime
 from typing import Dict, Optional
 
 class RangeStrategy:
-    """RSI+MFI Range-Bound Strategy for sideways markets - FIXED"""
+    """RSI+Bollinger Bands Range Strategy - Optimized"""
     
     def __init__(self):
         self.config = {
-            "rsi_length": 5,
-            "mfi_length": 5,
-            "oversold_weak": 40,
-            "oversold_strong": 50,
-            "mfi_threshold_weak": 35,
-            "mfi_threshold_strong": 50,
-            "overbought": 60,
-            "cooldown_seconds": 0.5,
-            "base_profit_usdt": 35,  # FIXED: Increased from 15 to 35
-            "max_hold_seconds": 180,
-            "fee_rate": 0.0011  # 0.11% round-trip fee (0.055% taker x 2)
+            "rsi_length": 14,  # FIXED: Standard RSI period
+            "bb_length": 20,   # FIXED: Bollinger Bands period
+            "bb_std": 2.0,     # FIXED: Standard deviation multiplier
+            "oversold": 30,    # FIXED: True oversold level
+            "overbought": 70,  # FIXED: True overbought level
+            "cooldown_seconds": 60,  # FIXED: Reasonable cooldown
+            "base_profit_usdt": 35,
+            "max_hold_seconds": 300,  # FIXED: 5 minutes max
+            "fee_rate": 0.0011
         }
         self.last_signal_time = None
         
     def calculate_rsi(self, prices: pd.Series) -> float:
-        """Calculate current RSI value"""
+        """Calculate RSI with standard 14-period"""
         period = self.config['rsi_length']
         if len(prices) < period + 5:
             return 50.0
@@ -32,7 +30,8 @@ class RangeStrategy:
         gain = delta.where(delta > 0, 0)
         loss = (-delta.where(delta < 0, 0))
         
-        alpha = 2.0 / (period + 1)
+        # Use Wilder's smoothing (standard RSI calculation)
+        alpha = 1.0 / period
         avg_gain = gain.ewm(alpha=alpha, min_periods=period).mean().iloc[-1]
         avg_loss = loss.ewm(alpha=alpha, min_periods=period).mean().iloc[-1]
         
@@ -43,120 +42,101 @@ class RangeStrategy:
         rsi = 100 - (100 / (1 + rs))
         return np.clip(rsi, 5, 95)
     
-    def calculate_mfi(self, high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series) -> float:
-        """Calculate current MFI value"""
-        period = self.config['mfi_length']
-        if len(close) < period + 5 or volume.sum() == 0:
-            return 50.0
+    def calculate_bollinger_position(self, prices: pd.Series) -> tuple:
+        """Calculate Bollinger Bands and current price position"""
+        period = self.config['bb_length']
+        std_mult = self.config['bb_std']
         
-        tp = (high + low + close) / 3
-        money_flow = tp * volume
+        if len(prices) < period:
+            return 0.5, 0  # Neutral position, no signal
         
-        mf_change = tp.diff().fillna(0)
-        pos_mf = money_flow.where(mf_change > 0, 0)
-        neg_mf = money_flow.where(mf_change <= 0, 0)
+        sma = prices.rolling(period).mean().iloc[-1]
+        std = prices.rolling(period).std().iloc[-1]
+        current_price = prices.iloc[-1]
         
-        alpha = 2.0 / (period + 1)
-        pos_mf_avg = pos_mf.ewm(alpha=alpha, min_periods=period).mean().iloc[-1]
-        neg_mf_avg = neg_mf.ewm(alpha=alpha, min_periods=period).mean().iloc[-1]
+        if pd.isna(sma) or pd.isna(std) or std == 0:
+            return 0.5, 0
         
-        if neg_mf_avg == 0:
-            return 85.0
+        upper_band = sma + (std * std_mult)
+        lower_band = sma - (std * std_mult)
         
-        mfi_ratio = pos_mf_avg / neg_mf_avg
-        mfi = 100 - (100 / (1 + mfi_ratio))
-        return np.clip(mfi, 15, 85)
-    
-    def calculate_profit_target(self, position_size_usdt: float) -> float:
-        """Calculate profit target including fees"""
-        fee_cost = position_size_usdt * self.config['fee_rate']
-        return self.config['base_profit_usdt'] + fee_cost
-    
-    def validate_trade_profitability(self, position_size_usdt: float, stop_distance_pct: float) -> bool:
-        """FIXED: Validate trade can be profitable given fees"""
-        fee_cost = position_size_usdt * self.config['fee_rate']
-        gross_profit_needed = self.config['base_profit_usdt'] + fee_cost
+        # Calculate position within bands (0 = lower band, 1 = upper band)
+        bb_position = (current_price - lower_band) / (upper_band - lower_band)
+        bb_position = np.clip(bb_position, 0, 1)
         
-        # Minimum price movement needed for profit
-        min_movement_pct = gross_profit_needed / position_size_usdt
+        # Calculate band width for volatility filter
+        band_width = (upper_band - lower_band) / sma
         
-        # Stop distance should allow for at least 2x the minimum movement
-        max_acceptable_stop_pct = min_movement_pct * 0.5  # 50% of required movement as max stop
-        
-        return stop_distance_pct <= max_acceptable_stop_pct
+        return bb_position, band_width
     
     def generate_signal(self, data: pd.DataFrame, market_condition: str) -> Optional[Dict]:
-        """Generate range trading signals"""
-        if len(data) < 20 or self._is_cooldown_active():
+        """Generate range trading signals with Bollinger Bands"""
+        if len(data) < 25 or self._is_cooldown_active():
+            return None
+        
+        # Only trade in ranging markets
+        if market_condition not in ["STRONG_RANGE", "WEAK_RANGE"]:
             return None
         
         rsi = self.calculate_rsi(data['close'])
-        mfi = self.calculate_mfi(data['high'], data['low'], data['close'], data['volume'])
+        bb_position, band_width = self.calculate_bollinger_position(data['close'])
         price = data['close'].iloc[-1]
         
-        if pd.isna(rsi) or pd.isna(mfi):
+        if pd.isna(rsi) or band_width == 0:
             return None
         
-        # Get thresholds based on market condition
-        oversold_level, mfi_level = (
-            (self.config['oversold_strong'], self.config['mfi_threshold_strong'])
-            if market_condition == "STRONG_RANGE" else
-            (self.config['oversold_weak'], self.config['mfi_threshold_weak'])
-        )
+        # Filter out low volatility periods (tight bands)
+        if band_width < 0.02:  # Less than 2% band width
+            return None
         
         signal = None
         
-        # Long signal: Mean reversion from oversold
-        if rsi <= oversold_level and mfi <= mfi_level:
-            signal = self._create_signal('BUY', rsi, mfi, price, data, market_condition)
-        # Short signal: Mean reversion from overbought
-        elif rsi >= self.config['overbought'] and mfi >= self.config['mfi_threshold_strong']:
-            signal = self._create_signal('SELL', rsi, mfi, price, data, market_condition)
+        # FIXED: Proper oversold/overbought with Bollinger confirmation
+        # Long signal: RSI oversold + price near lower Bollinger Band
+        if rsi <= self.config['oversold'] and bb_position <= 0.2:
+            signal = self._create_signal('BUY', rsi, bb_position, price, data, market_condition)
+        # Short signal: RSI overbought + price near upper Bollinger Band  
+        elif rsi >= self.config['overbought'] and bb_position >= 0.8:
+            signal = self._create_signal('SELL', rsi, bb_position, price, data, market_condition)
         
         if signal:
             self.last_signal_time = datetime.now()
         
         return signal
     
-    def _create_signal(self, action: str, rsi: float, mfi: float, price: float, 
+    def _create_signal(self, action: str, rsi: float, bb_position: float, price: float, 
                       data: pd.DataFrame, market_condition: str) -> Dict:
         """Create range trading signal"""
         window = data.tail(20)
         
         if action == 'BUY':
-            structure_stop = window['low'].min() * 0.9985
+            structure_stop = window['low'].min() * 0.998
             level = window['low'].min()
         else:
-            structure_stop = window['high'].max() * 1.0015
+            structure_stop = window['high'].max() * 1.002
             level = window['high'].max()
         
         # Validate stop distance
         stop_distance = abs(price - structure_stop) / price
-        if not (0.0005 <= stop_distance <= 0.005):
+        if not (0.001 <= stop_distance <= 0.008):  # FIXED: Better range
             return None
         
-        # FIXED: Validate trade profitability before creating signal
-        # Use typical position size for validation
-        typical_position_size = 9000  # Typical range strategy position size
-        if not self.validate_trade_profitability(typical_position_size, stop_distance):
-            return None
-        
-        # Calculate confidence
-        rsi_strength = abs(50 - rsi)
-        mfi_strength = abs(50 - mfi)
-        base_confidence = (rsi_strength + mfi_strength) * 1.5
+        # FIXED: Enhanced confidence calculation
+        rsi_strength = abs(50 - rsi) / 20  # 0-1 scale
+        bb_strength = abs(0.5 - bb_position) * 2  # 0-1 scale
+        base_confidence = (rsi_strength + bb_strength) * 40 + 60  # 60-100 range
         
         if market_condition == "STRONG_RANGE":
             base_confidence *= 1.1
         
-        confidence = np.clip(base_confidence, 60, 95)
+        confidence = np.clip(base_confidence, 65, 95)
         
         return {
             'action': action,
             'strategy': 'RANGE',
             'market_condition': market_condition,
             'rsi': round(rsi, 1),
-            'mfi': round(mfi, 1),
+            'bb_position': round(bb_position, 2),
             'price': price,
             'structure_stop': structure_stop,
             'level': level,
@@ -164,8 +144,7 @@ class RangeStrategy:
             'confidence': round(confidence, 1),
             'base_profit_usdt': self.config['base_profit_usdt'],
             'max_hold_seconds': self.config['max_hold_seconds'],
-            'timeframe': '1m',
-            'required_movement_pct': round((self.config['base_profit_usdt'] + typical_position_size * self.config['fee_rate']) / typical_position_size * 100, 3)
+            'timeframe': '1m'
         }
     
     def _is_cooldown_active(self) -> bool:
@@ -177,9 +156,9 @@ class RangeStrategy:
     def get_strategy_info(self) -> Dict:
         """Get strategy information"""
         return {
-            'name': 'RSI+MFI Range Strategy (Fixed)',
+            'name': 'RSI+Bollinger Range Strategy (Optimized)',
             'type': 'RANGE',
             'timeframe': '1m',
             'config': self.config,
-            'description': f'Mean reversion scalping - ${self.config["base_profit_usdt"]} net profit target'
+            'description': f'RSI({self.config["rsi_length"]}) + BB({self.config["bb_length"]}) mean reversion - ${self.config["base_profit_usdt"]} target'
         }

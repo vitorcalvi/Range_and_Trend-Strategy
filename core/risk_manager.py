@@ -5,16 +5,16 @@ from typing import Tuple, Dict, Any
 load_dotenv()
 
 class RiskManager:
-    """Dual Strategy Risk Manager with FIXED fee calculations"""
+    """FIXED Risk Manager - No double fee subtraction"""
 
     def __init__(self):
         self.symbol = os.getenv('TRADING_SYMBOL')
-        self.fee_rate = 0.0011  # 0.11% round-trip fee (0.055% taker x 2)
+        self.fee_rate = 0.0011  # 0.11% round-trip fee for reference only
         
-        # Strategy configurations - FIXED profit targets
+        # FIXED: Increased profit targets to account for Bybit fee deduction
         self.range_config = {
             'fixed_position_usdt': 9091,
-            'base_profit_usdt': 35,  # FIXED: Increased from 15 to 35
+            'gross_profit_target': 50,  # FIXED: $50 gross target (ensures ~$45 net after fees)
             'max_position_time': 180,
             'emergency_stop_pct': 0.006,
             'leverage': 10
@@ -36,31 +36,9 @@ class RiskManager:
     def set_strategy(self, strategy_type: str):
         """Set active strategy configuration"""
         strategy_type = strategy_type if strategy_type in ["RANGE", "TREND"] else "RANGE"
-        
         self.active_config = (self.range_config if strategy_type == "RANGE" 
                              else self.trend_config).copy()
         self.active_strategy = strategy_type
-    
-    def calculate_fee_adjusted_profit_target(self, position_size_usdt: float, base_profit: float = None) -> float:
-        """Calculate profit target including fees"""
-        if base_profit is None:
-            base_profit = self.active_config.get('base_profit_usdt', 35)  # FIXED: default to 35
-        
-        fee_cost = position_size_usdt * self.fee_rate
-        return base_profit + fee_cost
-    
-    def calculate_net_pnl(self, gross_pnl: float, position_size_usdt: float) -> float:
-        """FIXED: Calculate net PnL after fees"""
-        fee_cost = position_size_usdt * self.fee_rate
-        return gross_pnl - fee_cost
-    
-    def validate_trade_profitability(self, position_size_usdt: float, expected_profit: float) -> bool:
-        """FIXED: Validate trade can be profitable after fees"""
-        fee_cost = position_size_usdt * self.fee_rate
-        min_required_profit = self.active_config.get('base_profit_usdt', 35)
-        gross_profit_needed = min_required_profit + fee_cost
-        
-        return expected_profit >= gross_profit_needed
     
     def validate_trade(self, signal: Dict[str, Any], balance: float, current_price: float) -> Tuple[bool, str]:
         """Validate trade with strategy-specific rules"""
@@ -72,7 +50,6 @@ class RiskManager:
         
         # Stop distance validation
         stop_distance = abs(current_price - signal['structure_stop']) / current_price
-        
         min_stop, max_stop = (0.0005, 0.005) if self.active_strategy == "RANGE" else (0.003, 0.02)
         
         if not (min_stop <= stop_distance <= max_stop):
@@ -83,12 +60,18 @@ class RiskManager:
         if max_position < 100:
             return False, "Insufficient balance"
         
-        # FIXED: Profitability validation
-        expected_profit = max_position * stop_distance * 2  # Assume 2:1 RR minimum
-        if not self.validate_trade_profitability(max_position, expected_profit):
-            return False, f"Trade not profitable after fees (need ${self.calculate_fee_adjusted_profit_target(max_position):.2f} gross)"
+        # FIXED: Profitability validation - ensure minimum price movement covers fees + profit
+        min_price_movement_pct = (self.get_min_profitable_target(max_position) / max_position)
+        if stop_distance * 2 < min_price_movement_pct:  # Assume 2:1 RR minimum
+            return False, f"Trade movement too small for profitability (need {min_price_movement_pct*100:.3f}%+)"
         
         return True, "Valid"
+    
+    def get_min_profitable_target(self, position_size_usdt: float) -> float:
+        """FIXED: Calculate minimum profitable target (gross PnL needed)"""
+        estimated_fee_cost = position_size_usdt * self.fee_rate
+        min_net_profit = 30  # Minimum $30 net profit
+        return min_net_profit + estimated_fee_cost
     
     def calculate_position_size(self, balance: float, entry_price: float, stop_price: float) -> float:
         """Calculate position size based on active strategy"""
@@ -113,61 +96,49 @@ class RiskManager:
         return round(max(position_size, 0), 6)
     
     def should_close_position(self, current_price: float, entry_price: float, side: str, 
-                             unrealized_pnl: float, position_age_seconds: float, position_size_usdt: float = None) -> Tuple[bool, str]:
-        """FIXED: Determine if position should be closed"""
+                             unrealized_pnl: float, position_age_seconds: float) -> Tuple[bool, str]:
+        """FIXED: Use Bybit's unrealized PnL directly (no fee subtraction)"""
         if entry_price <= 0:
             return False, "hold"
         
-        # Calculate net PnL if position size provided
-        net_pnl = unrealized_pnl
-        if position_size_usdt:
-            net_pnl = self.calculate_net_pnl(unrealized_pnl, position_size_usdt)
-        
-        # Emergency stop based on gross PnL percentage
+        # Emergency stop based on unrealized PnL percentage
         pnl_pct = unrealized_pnl / entry_price if entry_price > 0 else 0
         if pnl_pct <= -self.active_config['emergency_stop_pct']:
             return True, "emergency_stop"
         
-        # Max hold time - FIXED: Use configured time, not hardcoded
+        # Max hold time
         if position_age_seconds >= self.active_config['max_position_time']:
             return True, "max_hold_time"
         
-        # Strategy-specific exits
-        return (self._check_range_exits(net_pnl, position_age_seconds, position_size_usdt) 
+        # Strategy-specific exits using raw unrealized PnL
+        return (self._check_range_exits(unrealized_pnl, position_age_seconds) 
                 if self.active_strategy == "RANGE" 
-                else self._check_trend_exits(current_price, entry_price, side, net_pnl, position_age_seconds))
+                else self._check_trend_exits(current_price, entry_price, side, unrealized_pnl, position_age_seconds))
     
-    def _check_range_exits(self, net_pnl: float, position_age_seconds: float, position_size_usdt: float = None) -> Tuple[bool, str]:
-        """FIXED: Range strategy specific exits"""
-        # Use provided position size or default
-        position_size = position_size_usdt or self.active_config['fixed_position_usdt']
-        profit_target = self.active_config['base_profit_usdt']  # Net profit target
+    def _check_range_exits(self, unrealized_pnl: float, position_age_seconds: float) -> Tuple[bool, str]:
+        """FIXED: Range exits using gross profit target"""
+        profit_target = self.active_config['gross_profit_target']  # $50 gross target
         
-        # Check if we hit our net profit target
-        if net_pnl >= profit_target:
+        # Exit when we hit gross profit target (Bybit will deduct fees automatically)
+        if unrealized_pnl >= profit_target:
             return True, "profit_target"
         
-        # FIXED: Use configured timeout instead of hardcoded 120s
-        # Only exit early if we're well past halfway point and losing money
-        timeout_threshold = self.active_config['max_position_time'] * 0.75  # 75% of max time
-        if position_age_seconds >= timeout_threshold and net_pnl <= -5:  # Losing more than $5
+        # Timeout exit - only if losing significant money
+        timeout_threshold = self.active_config['max_position_time'] * 0.75
+        if position_age_seconds >= timeout_threshold and unrealized_pnl <= -10:
             return True, "timeout_no_profit"
         
         return False, "hold"
     
     def _check_trend_exits(self, current_price: float, entry_price: float, side: str, 
-                          net_pnl: float, position_age_seconds: float) -> Tuple[bool, str]:
-        """FIXED: Trend strategy specific exits"""
-        if net_pnl > 0:
-            profit_ratio = net_pnl / (entry_price * 0.02)
+                          unrealized_pnl: float, position_age_seconds: float) -> Tuple[bool, str]:
+        """FIXED: Trend exits using unrealized PnL directly"""
+        if unrealized_pnl > 0:
+            profit_ratio = unrealized_pnl / (entry_price * 0.02)
             
             if profit_ratio >= self.trend_config['profit_lock_threshold']:
-                # Calculate fee-adjusted target
-                position_size = self.active_config['fixed_position_usdt']
-                fee_cost = position_size * self.fee_rate
                 target_profit = entry_price * 0.02 * self.trend_config['risk_reward_ratio']
-                
-                if net_pnl >= target_profit:
+                if unrealized_pnl >= target_profit:
                     return True, "profit_target"
         
         return False, "hold"
@@ -179,7 +150,6 @@ class RiskManager:
             return 0
         
         trail_distance = current_price * self.trend_config['trailing_stop_pct']
-        
         return (current_price - trail_distance if side.lower() == 'buy' 
                 else current_price + trail_distance)
     
@@ -192,7 +162,6 @@ class RiskManager:
         vol_multipliers = {"HIGH_VOL": 0.7, "LOW_VOL": 1.2, "NORMAL": 1.0}
         volatility_multiplier = vol_multipliers.get(volatility, 1.0)
         
-        # Apply adjustment
         self.active_config = base_config.copy()
         original_size = self.active_config['fixed_position_usdt']
         self.active_config['fixed_position_usdt'] = int(original_size * volatility_multiplier)
@@ -218,20 +187,20 @@ class RiskManager:
     def _get_position_sizing_info(self) -> Dict[str, Any]:
         """Get position sizing information"""
         if self.active_strategy == "RANGE":
-            profit_target = self.calculate_fee_adjusted_profit_target(self.range_config['fixed_position_usdt'])
-            net_profit = self.range_config['base_profit_usdt']
+            gross_target = self.range_config['gross_profit_target']
+            estimated_net = gross_target - (self.range_config['fixed_position_usdt'] * self.fee_rate)
             return {
                 'method': 'Fixed Size',
                 'size_usdt': self.active_config['fixed_position_usdt'],
-                'gross_target': f"${profit_target:.2f} USDT",
-                'net_profit': f"${net_profit:.2f} USDT",
+                'gross_target': f"${gross_target} USDT",
+                'estimated_net': f"${estimated_net:.2f} USDT",
                 'hold_time': f"{self.active_config['max_position_time']}s"
             }
         else:
             return {
                 'method': 'Risk-Based',
                 'max_size_usdt': self.active_config['fixed_position_usdt'],
-                'risk_reward': f"1:{self.trend_config['risk_reward_ratio']} (fee-adjusted)",
+                'risk_reward': f"1:{self.trend_config['risk_reward_ratio']}",
                 'hold_time': f"{self.active_config['max_position_time']}s"
             }
     
