@@ -9,7 +9,7 @@ from strategies.strategy_manager import StrategyManager
 from strategies.range_strategy import RangeStrategy  
 from strategies.trend_strategy import TrendStrategy
 from core.risk_manager import RiskManager
-from utils.telegram_notifier import TelegramNotifier
+from _utils.telegram_notifier import TelegramNotifier
 
 load_dotenv()
 
