@@ -4,18 +4,21 @@ from datetime import datetime
 from typing import Dict, Optional
 
 class RangeStrategy:
-    """RSI+Bollinger Bands Range Strategy - Optimized"""
+    """RSI+Bollinger Bands Range Strategy - FIXED for More Trading"""
     
     def __init__(self):
         self.config = {
-            "rsi_length": 14,  # FIXED: Standard RSI period
-            "bb_length": 20,   # FIXED: Bollinger Bands period
-            "bb_std": 2.0,     # FIXED: Standard deviation multiplier
-            "oversold": 30,    # FIXED: True oversold level
-            "overbought": 70,  # FIXED: True overbought level
-            "cooldown_seconds": 60,  # FIXED: Reasonable cooldown
+            "rsi_length": 14,
+            "bb_length": 20,
+            "bb_std": 2.0,
+            # FIXED: More reasonable RSI levels
+            "oversold": 35,      # Was 30 - too extreme
+            "overbought": 65,    # Was 70 - too extreme  
+            "rsi_neutral_low": 45,   # NEW: Neutral zone trading
+            "rsi_neutral_high": 55,  # NEW: Neutral zone trading
+            "cooldown_seconds": 30,  # FIXED: Reduced from 60
             "base_profit_usdt": 35,
-            "max_hold_seconds": 300,  # FIXED: 5 minutes max
+            "max_hold_seconds": 300,
             "fee_rate": 0.0011
         }
         self.last_signal_time = None
@@ -30,7 +33,6 @@ class RangeStrategy:
         gain = delta.where(delta > 0, 0)
         loss = (-delta.where(delta < 0, 0))
         
-        # Use Wilder's smoothing (standard RSI calculation)
         alpha = 1.0 / period
         avg_gain = gain.ewm(alpha=alpha, min_periods=period).mean().iloc[-1]
         avg_loss = loss.ewm(alpha=alpha, min_periods=period).mean().iloc[-1]
@@ -48,7 +50,7 @@ class RangeStrategy:
         std_mult = self.config['bb_std']
         
         if len(prices) < period:
-            return 0.5, 0  # Neutral position, no signal
+            return 0.5, 0
         
         sma = prices.rolling(period).mean().iloc[-1]
         std = prices.rolling(period).std().iloc[-1]
@@ -60,17 +62,25 @@ class RangeStrategy:
         upper_band = sma + (std * std_mult)
         lower_band = sma - (std * std_mult)
         
-        # Calculate position within bands (0 = lower band, 1 = upper band)
+        # Calculate position within bands
         bb_position = (current_price - lower_band) / (upper_band - lower_band)
         bb_position = np.clip(bb_position, 0, 1)
         
-        # Calculate band width for volatility filter
         band_width = (upper_band - lower_band) / sma
         
         return bb_position, band_width
     
+    def calculate_price_momentum(self, prices: pd.Series) -> float:
+        """Calculate short-term price momentum"""
+        if len(prices) < 5:
+            return 0
+        
+        # 5-period momentum
+        momentum = (prices.iloc[-1] - prices.iloc[-5]) / prices.iloc[-5]
+        return momentum
+    
     def generate_signal(self, data: pd.DataFrame, market_condition: str) -> Optional[Dict]:
-        """Generate range trading signals with Bollinger Bands"""
+        """FIXED: More active signal generation"""
         if len(data) < 25 or self._is_cooldown_active():
             return None
         
@@ -80,24 +90,33 @@ class RangeStrategy:
         
         rsi = self.calculate_rsi(data['close'])
         bb_position, band_width = self.calculate_bollinger_position(data['close'])
+        momentum = self.calculate_price_momentum(data['close'])
         price = data['close'].iloc[-1]
         
         if pd.isna(rsi) or band_width == 0:
             return None
         
-        # FIXED: Removed restrictive volatility filter - let signals through
-        # if band_width < 0.02:  # Too restrictive
-        #     return None
-        
         signal = None
         
-        # FIXED: Simplified conditions - price below lower band OR RSI oversold
-        # Long signal: Price below lower Bollinger Band OR RSI oversold
-        if rsi <= self.config['oversold'] or bb_position <= 0.1:
-            signal = self._create_signal('BUY', rsi, bb_position, price, data, market_condition)
-        # Short signal: Price above upper Bollinger Band OR RSI overbought  
-        elif rsi >= self.config['overbought'] or bb_position >= 0.9:
-            signal = self._create_signal('SELL', rsi, bb_position, price, data, market_condition)
+        # FIXED: Multiple signal conditions (more opportunities)
+        
+        # Strong oversold conditions
+        if (rsi <= self.config['oversold'] or bb_position <= 0.15):
+            signal = self._create_signal('BUY', rsi, bb_position, price, data, market_condition, 'strong_oversold')
+            
+        # Strong overbought conditions  
+        elif (rsi >= self.config['overbought'] or bb_position >= 0.85):
+            signal = self._create_signal('SELL', rsi, bb_position, price, data, market_condition, 'strong_overbought')
+            
+        # NEW: Neutral zone mean reversion (more active trading)
+        elif (self.config['rsi_neutral_low'] <= rsi <= self.config['rsi_neutral_high'] and
+              band_width > 0.015):  # Ensure some volatility
+            
+            # Mean reversion in neutral zone based on BB position and momentum
+            if bb_position <= 0.3 and momentum < -0.003:  # Lower BB area + negative momentum
+                signal = self._create_signal('BUY', rsi, bb_position, price, data, market_condition, 'neutral_reversion')
+            elif bb_position >= 0.7 and momentum > 0.003:  # Upper BB area + positive momentum  
+                signal = self._create_signal('SELL', rsi, bb_position, price, data, market_condition, 'neutral_reversion')
         
         if signal:
             self.last_signal_time = datetime.now()
@@ -105,36 +124,43 @@ class RangeStrategy:
         return signal
     
     def _create_signal(self, action: str, rsi: float, bb_position: float, price: float, 
-                      data: pd.DataFrame, market_condition: str) -> Dict:
+                      data: pd.DataFrame, market_condition: str, signal_reason: str) -> Dict:
         """Create range trading signal"""
-        window = data.tail(20)
+        window = data.tail(30)  # Longer window for better structure
         
         if action == 'BUY':
-            structure_stop = window['low'].min() * 0.998
+            structure_stop = window['low'].min() * 0.997  # Slightly tighter
             level = window['low'].min()
         else:
-            structure_stop = window['high'].max() * 1.002
+            structure_stop = window['high'].max() * 1.003  # Slightly tighter
             level = window['high'].max()
         
         # Validate stop distance
         stop_distance = abs(price - structure_stop) / price
-        if not (0.001 <= stop_distance <= 0.008):  # FIXED: Better range
+        if not (0.0008 <= stop_distance <= 0.012):  # FIXED: Wider acceptable range
             return None
         
-        # FIXED: Enhanced confidence calculation
-        rsi_strength = abs(50 - rsi) / 20  # 0-1 scale
-        bb_strength = abs(0.5 - bb_position) * 2  # 0-1 scale
-        base_confidence = (rsi_strength + bb_strength) * 40 + 60  # 60-100 range
+        # FIXED: Confidence based on signal type and conditions
+        base_confidence = 70
+        
+        if signal_reason == 'strong_oversold' or signal_reason == 'strong_overbought':
+            rsi_strength = abs(50 - rsi) / 20
+            bb_strength = abs(0.5 - bb_position) * 2
+            base_confidence = 75 + (rsi_strength + bb_strength) * 15
+        elif signal_reason == 'neutral_reversion':
+            bb_strength = abs(0.5 - bb_position) * 2
+            base_confidence = 65 + bb_strength * 20
         
         if market_condition == "STRONG_RANGE":
             base_confidence *= 1.1
         
-        confidence = np.clip(base_confidence, 65, 95)
+        confidence = np.clip(base_confidence, 60, 95)
         
         return {
             'action': action,
             'strategy': 'RANGE',
             'market_condition': market_condition,
+            'signal_reason': signal_reason,  # NEW: Track signal type
             'rsi': round(rsi, 1),
             'bb_position': round(bb_position, 2),
             'price': price,
@@ -156,9 +182,9 @@ class RangeStrategy:
     def get_strategy_info(self) -> Dict:
         """Get strategy information"""
         return {
-            'name': 'RSI+Bollinger Range Strategy (Optimized)',
+            'name': 'RSI+BB Range Strategy (ACTIVE)',
             'type': 'RANGE',
             'timeframe': '1m',
             'config': self.config,
-            'description': f'RSI({self.config["rsi_length"]}) + BB({self.config["bb_length"]}) mean reversion - ${self.config["base_profit_usdt"]} target'
+            'description': f'Multi-signal range strategy: RSI({self.config["rsi_length"]}) + BB({self.config["bb_length"]}) - ${self.config["base_profit_usdt"]} target'
         }

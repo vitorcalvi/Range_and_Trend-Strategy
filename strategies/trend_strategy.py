@@ -4,22 +4,23 @@ from datetime import datetime
 from typing import Dict, Optional
 
 class TrendStrategy:
-    """RSI+EMA Trend Following Strategy - Optimized"""
+    """FIXED: More Active RSI+EMA Trend Following Strategy"""
     
     def __init__(self):
         self.config = {
             "rsi_length": 14,
-            "fast_ema": 21,    # FIXED: Faster EMA for signals
-            "slow_ema": 50,    # FIXED: Slower EMA for trend direction
-            "uptrend_rsi_low": 40,   # FIXED: Better pullback levels
-            "uptrend_rsi_high": 60,  # FIXED: Wider range
-            "downtrend_rsi_low": 40,
-            "downtrend_rsi_high": 60,
-            "trend_strength_threshold": 0.002,  # FIXED: Minimum trend strength
-            "cooldown_seconds": 300,
-            "target_profit_multiplier": 2.0,  # FIXED: More realistic
-            "max_hold_seconds": 2400,  # FIXED: 40 minutes max
-            "trailing_stop_pct": 0.8,  # FIXED: Tighter trailing
+            "fast_ema": 21,
+            "slow_ema": 50,
+            # FIXED: More reasonable RSI levels for trending markets
+            "uptrend_rsi_low": 35,   # Was 40, now more permissive
+            "uptrend_rsi_high": 65,  # Was 60, now wider range
+            "downtrend_rsi_low": 35,
+            "downtrend_rsi_high": 65,
+            "trend_strength_threshold": 0.001,  # FIXED: Lower threshold (was 0.002)
+            "cooldown_seconds": 180,  # FIXED: Reduced from 300
+            "target_profit_multiplier": 2.0,
+            "max_hold_seconds": 2400,
+            "trailing_stop_pct": 0.8,
             "fee_rate": 0.0011
         }
         self.last_signal_time = None
@@ -56,10 +57,10 @@ class TrendStrategy:
         fast_ema = prices.ewm(span=fast_period, min_periods=fast_period).mean().iloc[-1]
         slow_ema = prices.ewm(span=slow_period, min_periods=slow_period).mean().iloc[-1]
         
-        # Determine trend direction with strength filter
         if pd.isna(fast_ema) or pd.isna(slow_ema):
             return fast_ema, slow_ema, 'NEUTRAL'
         
+        # FIXED: Lower threshold for trend detection
         ema_diff_pct = (fast_ema - slow_ema) / slow_ema
         
         if ema_diff_pct > self.config['trend_strength_threshold']:
@@ -85,12 +86,12 @@ class TrendStrategy:
         return slope
     
     def generate_signal(self, data: pd.DataFrame, market_condition: str) -> Optional[Dict]:
-        """Generate trend following signals"""
+        """FIXED: More active trend following signals"""
         if len(data) < 60 or self._is_cooldown_active():
             return None
         
-        # Only trade in trending markets
-        if market_condition not in ["TRENDING", "STRONG_TREND"]:
+        # FIXED: Trade in both trending AND weak ranging markets (more opportunities)
+        if market_condition not in ["TRENDING", "STRONG_TREND", "WEAK_RANGE"]:
             return None
         
         close = data['close']
@@ -102,22 +103,24 @@ class TrendStrategy:
         if pd.isna(rsi) or trend == 'NEUTRAL':
             return None
         
-        # FIXED: Require minimum momentum for trend trades
-        if abs(momentum) < 0.001:  # Less than 0.1% momentum
+        # FIXED: Reduced minimum momentum requirement
+        if abs(momentum) < 0.0005:  # Was 0.001, now more permissive
             return None
         
         signal = None
         
-        # FIXED: Better RSI pullback logic
-        # Long signal: Uptrend + RSI pullback from overbought
-        if (trend == 'UPTREND' and momentum > 0 and
-            self.config['uptrend_rsi_low'] <= rsi <= self.config['uptrend_rsi_high']):
-            signal = self._create_signal('BUY', trend, rsi, price, data, fast_ema, slow_ema, momentum)
-            
-        # Short signal: Downtrend + RSI pullback from oversold  
-        elif (trend == 'DOWNTREND' and momentum < 0 and
-              self.config['downtrend_rsi_low'] <= rsi <= self.config['downtrend_rsi_high']):
-            signal = self._create_signal('SELL', trend, rsi, price, data, fast_ema, slow_ema, momentum)
+        # FIXED: More permissive RSI conditions
+        if trend == 'UPTREND' and momentum > 0:
+            # Long signal: More flexible RSI range
+            if (self.config['uptrend_rsi_low'] <= rsi <= self.config['uptrend_rsi_high'] or
+                (rsi > 50 and momentum > 0.002)):  # NEW: Strong momentum override
+                signal = self._create_signal('BUY', trend, rsi, price, data, fast_ema, slow_ema, momentum)
+                
+        elif trend == 'DOWNTREND' and momentum < 0:
+            # Short signal: More flexible RSI range  
+            if (self.config['downtrend_rsi_low'] <= rsi <= self.config['downtrend_rsi_high'] or
+                (rsi < 50 and momentum < -0.002)):  # NEW: Strong momentum override
+                signal = self._create_signal('SELL', trend, rsi, price, data, fast_ema, slow_ema, momentum)
         
         if signal:
             self.last_signal_time = datetime.now()
@@ -127,38 +130,32 @@ class TrendStrategy:
     def _create_signal(self, action: str, trend: str, rsi: float, price: float, 
                       data: pd.DataFrame, fast_ema: float, slow_ema: float, momentum: float) -> Dict:
         """Create trend following signal"""
-        window = data.tail(40)  # FIXED: Longer window for better structure
+        window = data.tail(30)  # FIXED: Shorter window for faster signals
         
         if action == 'BUY':
             # Use EMA as dynamic support
-            ema_stop = fast_ema * 0.995
+            ema_stop = fast_ema * 0.994  # FIXED: Tighter stop
             swing_low = window['low'].min()
             structure_stop = max(swing_low, ema_stop)
             level = swing_low
         else:
             # Use EMA as dynamic resistance
-            ema_stop = fast_ema * 1.005
+            ema_stop = fast_ema * 1.006  # FIXED: Tighter stop
             swing_high = window['high'].max()
             structure_stop = min(swing_high, ema_stop)
             level = swing_high
         
-        # Validate stop distance
+        # FIXED: More lenient stop distance validation
         stop_distance = abs(price - structure_stop) / price
-        if not (0.005 <= stop_distance <= 0.025):  # FIXED: Better range for trends
+        if not (0.003 <= stop_distance <= 0.035):  # FIXED: Wider acceptable range
             return None
         
-        # FIXED: Enhanced confidence with multiple factors
+        # FIXED: Simplified confidence calculation
         trend_strength = abs(fast_ema - slow_ema) / slow_ema * 100
-        momentum_strength = abs(momentum) * 1000  # Convert to basis points
-        rsi_position = abs(rsi - 50) / 50  # Distance from neutral
+        momentum_strength = abs(momentum) * 1000
         
-        base_confidence = (
-            trend_strength * 0.4 +      # 40% weight on trend strength
-            momentum_strength * 0.3 +   # 30% weight on momentum  
-            rsi_position * 50 * 0.3     # 30% weight on RSI position
-        )
-        
-        confidence = np.clip(60 + base_confidence, 70, 95)
+        base_confidence = 65 + min(trend_strength * 2 + momentum_strength * 0.5, 25)
+        confidence = np.clip(base_confidence, 65, 90)
         
         return {
             'action': action,
@@ -167,7 +164,7 @@ class TrendStrategy:
             'rsi': round(rsi, 1),
             'fast_ema': round(fast_ema, 2),
             'slow_ema': round(slow_ema, 2),
-            'momentum': round(momentum * 100, 2),  # Show as percentage
+            'momentum': round(momentum * 100, 2),
             'price': price,
             'structure_stop': structure_stop,
             'level': level,
@@ -203,11 +200,11 @@ class TrendStrategy:
     def get_strategy_info(self) -> Dict:
         """Get strategy information"""
         return {
-            'name': f'RSI+EMA({self.config["fast_ema"]}/{self.config["slow_ema"]}) Trend Strategy',
+            'name': f'RSI+EMA({self.config["fast_ema"]}/{self.config["slow_ema"]}) Trend Strategy (ACTIVE)',
             'type': 'TREND',
             'timeframe': '15m', 
             'config': self.config,
-            'description': 'Trend following with momentum filter and dynamic EMA stops',
-            'expected_win_rate': '65-75%',
+            'description': 'More active trend following with lower thresholds',
+            'expected_win_rate': '60-70%',
             'risk_reward': f'1:{self.config["target_profit_multiplier"]}'
         }

@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import json
 from datetime import datetime
+from decimal import Decimal
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
 
@@ -190,16 +191,37 @@ class TradeEngine:
             self.rejections['invalid_signal'] += 1
             return None
     
+    def _validate_signal(self, signal, market_info):
+        """Enhanced signal validation"""
+        validation_checks = [
+            (not signal or market_info['condition'] == 'INSUFFICIENT_DATA', 'insufficient_data'),
+            (market_info['confidence'] < 0.6, 'invalid_market'),
+            (signal.get('confidence', 0) < 60, 'invalid_signal')
+        ]
+        
+        for condition, rejection_type in validation_checks:
+            if condition:
+                self.rejections[rejection_type] += 1
+                return False
+        
+        return True
+    
     async def _execute_trade(self, signal, strategy_type, market_info):
-        """Execute trade"""
+        """Execute trade with fee-aware position sizing"""
         current_price = float(self.price_data_1m['close'].iloc[-1])
         balance = await self.get_account_balance()
         
         if not balance or not self._validate_signal(signal, market_info):
             return
         
-        base_qty = self.risk_manager.calculate_position_size(balance, current_price, signal['structure_stop'])
-        sizing_multiplier = self.strategy_manager.get_position_sizing_multiplier(strategy_type, market_info)
+        # Fee-aware position sizing through risk manager
+        base_qty = self.risk_manager.calculate_position_size(
+            balance, current_price, signal['structure_stop']
+        )
+        
+        sizing_multiplier = self.strategy_manager.get_position_sizing_multiplier(
+            strategy_type, market_info
+        )
         qty = base_qty * sizing_multiplier
         
         formatted_qty = self.format_quantity(qty)
@@ -207,6 +229,7 @@ class TradeEngine:
         if formatted_qty == "0" or float(formatted_qty) < 0.001:
             return
         
+        # Calculate actual position size for fee tracking
         position_size_usdt = float(formatted_qty) * current_price
         
         try:
@@ -224,26 +247,17 @@ class TradeEngine:
                 self.position_entry_price = current_price
                 self.position_size_usdt = position_size_usdt
                 
+                # Log with fee information
+                break_even_fees = float(self.risk_manager.get_break_even_pnl(position_size_usdt))
+                
                 self._log_trade("ENTRY", current_price, signal=signal, quantity=formatted_qty, 
-                               strategy=strategy_type, position_size_usdt=position_size_usdt)
-                await self.notifier.send_trade_entry(signal, current_price, formatted_qty, self._get_strategy_info())
-        except:
-            pass
-    
-    def _validate_signal(self, signal, market_info):
-        """Enhanced signal validation"""
-        validation_checks = [
-            (not signal or market_info['condition'] == 'INSUFFICIENT_DATA', 'insufficient_data'),
-            (market_info['confidence'] < 0.6, 'invalid_market'),
-            (signal.get('confidence', 0) < 60, 'invalid_signal')
-        ]
-        
-        for condition, rejection_type in validation_checks:
-            if condition:
-                self.rejections[rejection_type] += 1
-                return False
-        
-        return True
+                               strategy=strategy_type, position_size_usdt=position_size_usdt,
+                               break_even_fees=break_even_fees)
+                               
+                await self.notifier.send_trade_entry(signal, current_price, formatted_qty, 
+                                                   self._get_strategy_info())
+        except Exception as e:
+            print(f"❌ Trade execution error: {e}")
     
     async def _check_position_status(self):
         """Check position status"""
@@ -273,7 +287,7 @@ class TradeEngine:
             pass
     
     async def _check_position_exit(self):
-        """FIXED: Use Bybit's unrealized PnL directly (no fee subtraction)"""
+        """Fee-aware position exit checking"""
         if not self.position or not self.position_start_time:
             return
         
@@ -281,28 +295,32 @@ class TradeEngine:
         entry_price = self.position_entry_price or float(self.position.get('avgPrice', 0))
         side = self.position.get('side', '')
         
-        # FIXED: Use Bybit's unrealized PnL as-is (no fee subtraction)
+        # Use Bybit's unrealized PnL
         unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
         position_age = (datetime.now() - self.position_start_time).total_seconds()
+        
+        # Get position size for fee calculations
+        position_size_usdt = self.position_size_usdt or (
+            float(self.position.get('size', 0)) * entry_price
+        )
         
         if self.risk_manager.active_strategy != self.active_strategy:
             self.risk_manager.set_strategy(self.active_strategy)
         
+        # Fee-aware exit decision
         should_close, reason = self.risk_manager.should_close_position(
-            current_price, entry_price, side, unrealized_pnl, position_age
+            current_price, entry_price, side, unrealized_pnl, position_age, position_size_usdt
         )
         
         if should_close:
             await self._close_position(reason)
     
     async def _close_position(self, reason="Manual"):
-        """FIXED: Close position and log Bybit's actual PnL"""
+        """Close position and log with fee information"""
         if not self.position:
             return
         
         current_price = float(self.price_data_1m['close'].iloc[-1]) if len(self.price_data_1m) > 0 else 0
-        
-        # FIXED: Use Bybit's unrealized PnL directly - Bybit will deduct fees when closing
         unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
         
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
@@ -319,14 +337,14 @@ class TradeEngine:
                 
                 self._track_exit_reason(reason)
                 
-                # FIXED: Log the unrealized PnL - Bybit's closed PnL will show actual result after fees
                 self._log_trade("EXIT", current_price, reason=reason, bybit_unrealized_pnl=unrealized_pnl, 
-                               strategy=self.active_strategy, duration=duration)
+                               strategy=self.active_strategy, duration=duration, 
+                               position_size_usdt=self.position_size_usdt or 0)
                 
                 exit_data = {'trigger': reason, 'strategy': self.active_strategy}
                 await self.notifier.send_trade_exit(exit_data, current_price, unrealized_pnl, duration, self._get_strategy_info())
-        except:
-            pass
+        except Exception as e:
+            print(f"❌ Position close error: {e}")
     
     async def _on_strategy_switch(self, old_strategy, new_strategy):
         """Handle strategy switch"""
@@ -351,7 +369,7 @@ class TradeEngine:
             price = float(self.price_data_1m['close'].iloc[-1]) if len(self.price_data_1m) > 0 else 0
             self._track_exit_reason('position_closed')
             self._log_trade("EXIT", price, reason="position_closed", bybit_unrealized_pnl=unrealized_pnl, 
-                           strategy=self.active_strategy)
+                           strategy=self.active_strategy, position_size_usdt=self.position_size_usdt or 0)
     
     def _reset_position(self):
         """Reset position state"""
@@ -368,39 +386,54 @@ class TradeEngine:
             self.exit_reasons['manual_exit'] += 1
     
     def _log_trade(self, action, price, **kwargs):
-        """FIXED: Enhanced trade logging with Bybit PnL tracking"""
+        """Enhanced trade logging with fee information"""
         timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
         
         if action == "ENTRY":
             self.trade_id += 1
             signal = kwargs.get('signal', {})
+            break_even_fees = kwargs.get('break_even_fees', 0)
+            
             log_data = {
                 'timestamp': timestamp, 'id': self.trade_id, 'action': 'ENTRY',
                 'strategy': kwargs.get('strategy', 'UNKNOWN'),
                 'side': signal.get('action', ''), 'price': round(price, 2), 
-                'size': kwargs.get('quantity', ''), 'market_condition': self.market_info.get('condition', ''),
+                'size': kwargs.get('quantity', ''), 
+                'market_condition': self.market_info.get('condition', ''),
                 'adx': round(self.market_info.get('adx', 0), 1),
                 'confidence': round(signal.get('confidence', 0), 1),
                 'position_size_usdt': round(kwargs.get('position_size_usdt', 0), 2),
-                'note': 'Entry completed - awaiting Bybit close for actual PnL'
+                'break_even_fees': round(break_even_fees, 2),
+                'note': f'Need ${break_even_fees:.2f} profit to cover 0.11% fees'
             }
         else:
             duration = kwargs.get('duration', 0)
+            bybit_pnl = kwargs.get('bybit_unrealized_pnl', 0)
+            
+            # Calculate estimated net profit (approximation)
+            position_size = kwargs.get('position_size_usdt', 0)
+            if position_size > 0:
+                break_even_fees = float(self.risk_manager.get_break_even_pnl(position_size))
+                estimated_net = bybit_pnl - break_even_fees
+            else:
+                estimated_net = bybit_pnl
+            
             log_data = {
                 'timestamp': timestamp, 'id': self.trade_id, 'action': 'EXIT',
                 'strategy': kwargs.get('strategy', 'UNKNOWN'),
                 'trigger': kwargs.get('reason', '').lower().replace(' ', '_'),
                 'price': round(price, 2), 
-                'bybit_unrealized_pnl': round(kwargs.get('bybit_unrealized_pnl', 0), 2),
+                'bybit_unrealized_pnl': round(bybit_pnl, 2),
+                'estimated_net_profit': round(estimated_net, 2),
                 'hold_seconds': round(duration, 1),
-                'note': 'Check Bybit Closed PnL for actual result after fees'
+                'note': 'Estimated net = unrealized_pnl - fees (0.11%)'
             }
         
         try:
             with open(self.log_file, "a") as f:
                 f.write(json.dumps(log_data) + "\n")
-        except:
-            pass
+        except Exception as e:
+            print(f"❌ Logging error: {e}")
     
     async def get_account_balance(self):
         """Get account balance"""
@@ -420,7 +453,7 @@ class TradeEngine:
                 else self.trend_strategy.get_strategy_info())
     
     def _display_status(self):
-        """FIXED: Display status with correct strategy config keys"""
+        """Display enhanced status with fee information"""
         try:
             price = float(self.price_data_1m['close'].iloc[-1])
             time = self.price_data_1m.index[-1].strftime('%H:%M:%S')
@@ -430,7 +463,7 @@ class TradeEngine:
             print("\n" * 50)
             
             w = 77
-            print(f"{'='*w}\n⚡  {symbol_display} DUAL-STRATEGY BOT (FIXED - NO DOUBLE FEES)\n{'='*w}\n")
+            print(f"{'='*w}\n⚡  {symbol_display} DUAL-STRATEGY BOT (FEE-AWARE v2.0)\n{'='*w}\n")
             
             market_condition = self.market_info.get('condition', 'UNKNOWN')
             adx = self.market_info.get('adx', 0)
@@ -441,34 +474,35 @@ class TradeEngine:
             print(f"⚙️  Active Strategy: {self.active_strategy or 'NONE':<13} │ 🕐 Timeframe: {self._get_active_timeframe()}")
             print("─"*w + "\n")
             
-            print("📋  STRATEGY STATUS (FIXED)\n" + "─"*w)
+            print("📋  STRATEGY STATUS (FEE-AWARE)\n" + "─"*w)
             if self.active_strategy == "RANGE":
                 strategy_info = self.range_strategy.get_strategy_info()
                 gross_target = self.risk_manager.range_config['gross_profit_target']
+                fee_cost = gross_target * float(self.risk_manager.fee_rate)
+                net_target = gross_target - fee_cost
                 print(f"🎯 {strategy_info['name']}")
-                print(f"📊 Target: ${gross_target} GROSS (Bybit deducts fees) │ Hold: {strategy_info['config']['max_hold_seconds']}s")
+                print(f"📊 Target: ${gross_target} gross → ${net_target:.2f} net (after 0.11% fees)")
             else:
                 strategy_info = self.trend_strategy.get_strategy_info()
                 print(f"📈 {strategy_info['name']}")
-                # FIXED: Use correct config keys for trend strategy
                 fast_ema = strategy_info['config']['fast_ema']
                 slow_ema = strategy_info['config']['slow_ema']
                 rsi_length = strategy_info['config']['rsi_length']
                 target_mult = strategy_info['config']['target_profit_multiplier']
-                print(f"📊 RSI({rsi_length}) + EMA({fast_ema}/{slow_ema}) │ RR: 1:{target_mult}")
+                print(f"📊 RSI({rsi_length}) + EMA({fast_ema}/{slow_ema}) │ RR: 1:{target_mult} (fee-adjusted)")
             print("─"*w + "\n")
             
             print("📊  PERFORMANCE METRICS\n" + "─"*w)
             total_trades = sum(self.exit_reasons.values())
             total_signals = self.rejections.get('total_signals', 0)
             print(f"🔢 Total Trades: {total_trades:>3} │ 📈 Signals: {total_signals:>3} │ ✅ Accept Rate: {(total_trades/max(total_signals,1)*100):>4.1f}%")
-            print(f"📝 Check logs/trades.log and Bybit Closed PnL for actual results")
+            print(f"📝 Check logs/trades.log for detailed fee-aware profit tracking")
             
             print("─"*w + "\n")
             print(f"⏰ {time}   |   💰 ${price_formatted}")
             print()
             
-            # FIXED: Position info using Bybit unrealized PnL
+            # Position info with fee calculations
             if self.position:
                 unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
                 entry = self.position_entry_price or float(self.position.get('avgPrice', 0))
@@ -478,13 +512,17 @@ class TradeEngine:
                 pnl_pct = (unrealized_pnl / (float(size) * entry)) * 100 if entry > 0 and size != '0' else 0
                 age = (datetime.now() - self.position_start_time).total_seconds() if self.position_start_time else 0
                 
+                # Calculate fee-aware metrics
+                position_size_usdt = self.position_size_usdt or (float(size) * entry)
+                break_even_fees = float(self.risk_manager.get_break_even_pnl(position_size_usdt))
+                net_pnl = unrealized_pnl - break_even_fees
+                
                 emoji = "🟢" if side == "Buy" else "🔴"
                 print(f"{emoji} {side} Position: {size} @ ${entry:.2f} │ Strategy: {self.active_strategy}")
-                print(f"   Bybit Unrealized PnL: ${unrealized_pnl:.2f} ({pnl_pct:+.2f}%)")
+                print(f"   Gross PnL: ${unrealized_pnl:.2f} │ Fees: ${break_even_fees:.2f} │ Net: ${net_pnl:.2f}")
                 print(f"   Age: {age:.1f}s │ Max Hold: {self.risk_manager.get_max_position_time()}s")
-                print(f"   📝 Final PnL shown in Bybit after close (fees auto-deducted)")
             else:
-                print("⚡  No Position — FIXED Fee-Aware Scanner Active")
+                print("⚡  No Position — Fee-Aware Scanner Active (0.11% cost factored)")
             
             print("─" * 60)
             
