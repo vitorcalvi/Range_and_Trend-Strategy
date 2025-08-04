@@ -420,7 +420,7 @@ class TradeEngine:
                 else self.trend_strategy.get_strategy_info())
     
     def _display_status(self):
-        """FIXED: Display status with Bybit PnL (no fee calculations)"""
+        """FIXED: Display status with correct strategy config keys"""
         try:
             price = float(self.price_data_1m['close'].iloc[-1])
             time = self.price_data_1m.index[-1].strftime('%H:%M:%S')
@@ -450,7 +450,12 @@ class TradeEngine:
             else:
                 strategy_info = self.trend_strategy.get_strategy_info()
                 print(f"📈 {strategy_info['name']}")
-                print(f"📊 RSI({strategy_info['config']['rsi_length']}) + MA({strategy_info['config']['ma_length']}) │ RR: 1:{strategy_info['config']['target_profit_multiplier']}")
+                # FIXED: Use correct config keys for trend strategy
+                fast_ema = strategy_info['config']['fast_ema']
+                slow_ema = strategy_info['config']['slow_ema']
+                rsi_length = strategy_info['config']['rsi_length']
+                target_mult = strategy_info['config']['target_profit_multiplier']
+                print(f"📊 RSI({rsi_length}) + EMA({fast_ema}/{slow_ema}) │ RR: 1:{target_mult}")
             print("─"*w + "\n")
             
             print("📊  PERFORMANCE METRICS\n" + "─"*w)
