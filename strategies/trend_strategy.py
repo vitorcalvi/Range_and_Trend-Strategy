@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Dict, Optional
 
 class TrendStrategy:
-    """RSI(14) + Moving Average Trend Following Strategy"""
+    """RSI+MA Trend Following Strategy with fee-adjusted targets"""
     
     def __init__(self):
         self.config = {
@@ -19,70 +19,80 @@ class TrendStrategy:
             "cooldown_seconds": 300,
             "target_profit_multiplier": 2.5,
             "max_hold_seconds": 3600,
-            "trailing_stop_pct": 0.5
+            "trailing_stop_pct": 0.5,
+            "fee_rate": 0.0011  # 0.11% round-trip fee
         }
         self.last_signal_time = None
         
-    def calculate_rsi(self, prices: pd.Series) -> pd.Series:
-        """Calculate standard RSI(14)"""
+    def calculate_rsi(self, prices: pd.Series) -> float:
+        """Calculate current RSI value"""
         period = self.config['rsi_length']
         if len(prices) < period + 5:
-            return pd.Series(50.0, index=prices.index)
+            return 50.0
         
-        delta = prices.diff()
+        delta = prices.diff().fillna(0)
         gain = delta.where(delta > 0, 0)
         loss = (-delta.where(delta < 0, 0))
         
         alpha = 1.0 / period
-        avg_gain = gain.ewm(alpha=alpha, min_periods=period).mean()
-        avg_loss = loss.ewm(alpha=alpha, min_periods=period).mean()
+        avg_gain = gain.ewm(alpha=alpha, min_periods=period).mean().iloc[-1]
+        avg_loss = loss.ewm(alpha=alpha, min_periods=period).mean().iloc[-1]
         
-        rs = avg_gain / (avg_loss + 1e-8)
+        if avg_loss == 0:
+            return 95.0
+        
+        rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
-        
-        return rsi.fillna(50.0)
+        return np.clip(rsi, 5, 95)
     
-    def calculate_ma(self, prices: pd.Series) -> pd.Series:
-        """Calculate moving average"""
+    def calculate_ma(self, prices: pd.Series) -> float:
+        """Calculate current moving average value"""
         period = self.config['ma_length']
         if len(prices) < period:
-            return pd.Series(prices.iloc[-1], index=prices.index)
+            return prices.iloc[-1]
             
-        try:
-            if self.config['ma_type'] == "EMA":
-                ma = prices.ewm(span=period, min_periods=period).mean()
-            else:
-                ma = prices.rolling(period, min_periods=period).mean()
-            return ma.fillna(prices.iloc[-1])
-        except:
-            return pd.Series(prices.iloc[-1], index=prices.index)
+        if self.config['ma_type'] == "EMA":
+            ma = prices.ewm(span=period, min_periods=period).mean().iloc[-1]
+        else:
+            ma = prices.rolling(period, min_periods=period).mean().iloc[-1]
+        
+        return ma if pd.notna(ma) else prices.iloc[-1]
     
-    def detect_trend(self, close: pd.Series, ma: pd.Series) -> str:
+    def detect_trend(self, close: pd.Series, ma_value: float) -> str:
         """Detect trend direction using price vs MA"""
-        if len(close) < 5 or len(ma) < 5:
+        if len(close) < 5:
             return 'NEUTRAL'
-            
-        try:
-            current_price = close.iloc[-1]
-            current_ma = ma.iloc[-1]
-            
-            if pd.isna(current_price) or pd.isna(current_ma):
-                return 'NEUTRAL'
-            
-            # Check MA slope for trend confirmation
-            if len(ma) >= 5:
-                ma_slope = (ma.iloc[-1] - ma.iloc[-5]) / ma.iloc[-5]
-            else:
-                ma_slope = 0
-            
-            if current_price > current_ma and ma_slope > self.config['momentum_threshold']:
-                return 'UPTREND'
-            elif current_price < current_ma and ma_slope < -self.config['momentum_threshold']:
-                return 'DOWNTREND'
-            else:
-                return 'NEUTRAL'
-        except Exception:
+        
+        current_price = close.iloc[-1]
+        if pd.isna(current_price) or pd.isna(ma_value):
             return 'NEUTRAL'
+        
+        # Check MA slope for trend confirmation
+        ma_series = close.ewm(span=self.config['ma_length']).mean()
+        if len(ma_series) >= 5:
+            ma_slope = (ma_series.iloc[-1] - ma_series.iloc[-5]) / ma_series.iloc[-5]
+        else:
+            ma_slope = 0
+        
+        threshold = self.config['momentum_threshold']
+        
+        if current_price > ma_value and ma_slope > threshold:
+            return 'UPTREND'
+        elif current_price < ma_value and ma_slope < -threshold:
+            return 'DOWNTREND'
+        else:
+            return 'NEUTRAL'
+    
+    def calculate_fee_adjusted_target(self, entry_price: float, stop_price: float, position_size_usdt: float) -> float:
+        """Calculate target price adjusted for fees"""
+        fee_cost = position_size_usdt * self.config['fee_rate']
+        risk_amount = abs(entry_price - stop_price)
+        target_distance = risk_amount * self.config['target_profit_multiplier']
+        
+        # Add fee cost to required profit
+        fee_adjusted_distance = target_distance + (fee_cost / (position_size_usdt / entry_price))
+        
+        return entry_price + fee_adjusted_distance if entry_price > stop_price else entry_price - fee_adjusted_distance
     
     def generate_signal(self, data: pd.DataFrame, market_condition: str) -> Optional[Dict]:
         """Generate trend following signals"""
@@ -94,9 +104,9 @@ class TrendStrategy:
             return None
         
         close = data['close']
-        rsi = self.calculate_rsi(close).iloc[-1]
-        ma = self.calculate_ma(close)
-        trend = self.detect_trend(close, ma)
+        rsi = self.calculate_rsi(close)
+        ma_value = self.calculate_ma(close)
+        trend = self.detect_trend(close, ma_value)
         price = close.iloc[-1]
         
         if pd.isna(rsi) or trend == 'NEUTRAL':
@@ -107,11 +117,11 @@ class TrendStrategy:
         # Long signal: Uptrend + RSI pullback
         if (trend == 'UPTREND' and 
             self.config['uptrend_rsi_low'] <= rsi <= self.config['uptrend_rsi_high']):
-            signal = self._create_signal('BUY', trend, rsi, price, data, ma.iloc[-1])
+            signal = self._create_signal('BUY', trend, rsi, price, data, ma_value)
         # Short signal: Downtrend + RSI pullback  
         elif (trend == 'DOWNTREND' and 
               self.config['downtrend_rsi_low'] <= rsi <= self.config['downtrend_rsi_high']):
-            signal = self._create_signal('SELL', trend, rsi, price, data, ma.iloc[-1])
+            signal = self._create_signal('SELL', trend, rsi, price, data, ma_value)
         
         if signal:
             self.last_signal_time = datetime.now()
@@ -136,14 +146,8 @@ class TrendStrategy:
         
         # Validate stop distance
         stop_distance = abs(price - structure_stop) / price
-        if stop_distance < 0.003 or stop_distance > 0.02:
+        if not (0.003 <= stop_distance <= 0.02):
             return None
-        
-        # Calculate target based on risk-reward ratio
-        risk_amount = abs(price - structure_stop)
-        target_distance = risk_amount * self.config['target_profit_multiplier']
-        
-        target_price = price + target_distance if action == 'BUY' else price - target_distance
         
         # Calculate confidence
         trend_strength = abs(price - ma_value) / ma_value * 100
@@ -158,7 +162,6 @@ class TrendStrategy:
             'ma_value': round(ma_value, 2),
             'price': price,
             'structure_stop': structure_stop,
-            'target_price': target_price,
             'level': level,
             'signal_type': f"trend_{action.lower()}",
             'confidence': round(base_confidence, 1),
@@ -173,23 +176,6 @@ class TrendStrategy:
         if not self.last_signal_time:
             return False
         return (datetime.now() - self.last_signal_time).total_seconds() < self.config['cooldown_seconds']
-    
-    def calculate_indicators(self, data: pd.DataFrame) -> Dict[str, pd.Series]:
-        """Calculate strategy indicators"""
-        if len(data) < max(self.config['rsi_length'], self.config['ma_length']) + 5:
-            return {}
-        
-        try:
-            close = data['close']
-            rsi = self.calculate_rsi(close)
-            ma = self.calculate_ma(close)
-            
-            if rsi.isna().all() or ma.isna().all():
-                return {}
-                
-            return {'rsi': rsi, 'ma': ma}
-        except:
-            return {}
     
     def should_trail_stop(self, entry_price: float, current_price: float, side: str, 
                          unrealized_pnl: float) -> tuple[bool, float]:
@@ -213,7 +199,7 @@ class TrendStrategy:
             'type': 'TREND',
             'timeframe': '15m', 
             'config': self.config,
-            'description': 'Trend following with RSI pullbacks and 1:2.5 RR',
+            'description': 'Trend following with RSI pullbacks and fee-adjusted targets',
             'win_rate': '70-83%',
-            'risk_reward': '1:2.5'
+            'risk_reward': f'1:{self.config["target_profit_multiplier"]}'
         }

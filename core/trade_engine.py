@@ -1,6 +1,8 @@
 import os
 import asyncio
 import pandas as pd
+import numpy as np
+import json
 from datetime import datetime
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
@@ -15,7 +17,7 @@ load_dotenv()
 
 class TradeEngine:
     def __init__(self):
-        # Core components
+        # Strategy system
         self.strategy_manager = StrategyManager()
         self.range_strategy = RangeStrategy()
         self.trend_strategy = TrendStrategy()
@@ -42,10 +44,17 @@ class TradeEngine:
         self.trade_id = 0
         self.active_strategy = None
         self.market_info = {}
+        self.successful_entries = 0
         
         # Performance tracking
-        self.exit_reasons = {}
-        self.rejections = {'total_signals': 0}
+        self.exit_reasons = {
+            'profit_target': 0, 'emergency_stop': 0, 'max_hold_time': 0,
+            'trailing_stop': 0, 'strategy_switch': 0, 'manual_exit': 0
+        }
+        self.rejections = {
+            'invalid_market': 0, 'cooldown_active': 0, 'insufficient_data': 0,
+            'invalid_signal': 0, 'total_signals': 0
+        }
         
         self._set_symbol_rules()
         os.makedirs("logs", exist_ok=True)
@@ -54,8 +63,8 @@ class TradeEngine:
     def _set_symbol_rules(self):
         """Set symbol-specific trading rules"""
         symbol_rules = {
-            'ETH': ('0.01', 0.01), 
-            'BTC': ('0.001', 0.001), 
+            'ETH': ('0.01', 0.01),
+            'BTC': ('0.001', 0.001),
             'ADA': ('1', 1.0)
         }
         
@@ -63,6 +72,7 @@ class TradeEngine:
             if key in self.symbol:
                 self.qty_step, self.min_qty = step, min_qty
                 return
+        
         self.qty_step, self.min_qty = '1', 1.0
     
     def connect(self):
@@ -77,6 +87,7 @@ class TradeEngine:
         """Format quantity according to exchange rules"""
         if qty < self.min_qty:
             return "0"
+        
         try:
             decimals = len(self.qty_step.split('.')[1]) if '.' in self.qty_step else 0
             qty_step_float = float(self.qty_step)
@@ -86,35 +97,36 @@ class TradeEngine:
             return f"{qty:.3f}"
     
     async def run_cycle(self):
-        """Main trading cycle"""
+        """Run one trading cycle"""
         if not await self._update_market_data():
             return
         
         await self._check_position_status()
         
-        if self.position:
+        if self.position and self.position_start_time:
             await self._check_position_exit()
-        else:
+        
+        if not self.position:
             await self._generate_and_execute_signal()
         
         self._display_status()
     
     async def _update_market_data(self):
-        """Update market data for both timeframes"""
+        """Update both 1m and 15m market data"""
         try:
-            # Fetch both timeframes
+            # Fetch data
             klines_1m = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="1", limit=200)
             klines_15m = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="15", limit=100)
             
             if klines_1m.get('retCode') != 0 or klines_15m.get('retCode') != 0:
                 return False
             
-            # Process data
             self.price_data_1m = self._process_kline_data(klines_1m['result']['list'])
             self.price_data_15m = self._process_kline_data(klines_15m['result']['list'])
             
             # Validate data quality
-            return (len(self.price_data_1m) > 50 and len(self.price_data_15m) > 30 and
+            return (len(self.price_data_1m) > 50 and 
+                   len(self.price_data_15m) > 30 and
                    not self.price_data_1m['close'].isna().any() and
                    not self.price_data_15m['close'].isna().any())
         except:
@@ -122,31 +134,30 @@ class TradeEngine:
     
     def _process_kline_data(self, kline_list):
         """Process kline data into DataFrame"""
-        try:
-            if not kline_list:
-                return pd.DataFrame()
-                
-            df = pd.DataFrame(kline_list, columns=[
-                'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
-            ])
-            
-            if df.empty:
-                return df
-            
-            # Convert types
-            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            # Clean and sort (pandas 2.1+ compatible)
-            df = df.ffill().sort_values('timestamp').set_index('timestamp')
-            return df if not df.empty else pd.DataFrame()
-            
-        except:
+        if not kline_list:
             return pd.DataFrame()
+            
+        df = pd.DataFrame(kline_list, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
+        ])
+        
+        if df.empty:
+            return df
+        
+        # Convert and validate data
+        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Forward fill any NaN values
+        df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].iloc[-1])
+        
+        # Sort and set index
+        return df.sort_values('timestamp').set_index('timestamp')
     
     async def _generate_and_execute_signal(self):
-        """Generate and execute trading signals"""
+        """Generate and execute signals using dual strategy system"""
         # Select strategy based on market conditions
         strategy_type, market_info = self.strategy_manager.select_strategy(
             self.price_data_1m, self.price_data_15m
@@ -156,13 +167,14 @@ class TradeEngine:
         
         # Handle strategy switch
         if self.active_strategy and self.active_strategy != strategy_type:
-            await self._handle_strategy_switch()
+            await self._on_strategy_switch(self.active_strategy, strategy_type)
         
-        # Update risk manager
+        # Synchronize risk manager
         if self.active_strategy != strategy_type:
             self.risk_manager.set_strategy(strategy_type)
             self.risk_manager.adapt_to_market_condition(
-                market_info['condition'], market_info.get('volatility', 'NORMAL')
+                market_info['condition'], 
+                market_info.get('volatility', 'NORMAL')
             )
         
         self.active_strategy = strategy_type
@@ -170,9 +182,10 @@ class TradeEngine:
         # Generate and execute signal
         signal = self._generate_signal(strategy_type, market_info)
         
-        if signal and self._validate_signal(signal, market_info):
+        if signal:
             self.rejections['total_signals'] += 1
-            await self._execute_trade(signal, strategy_type)
+            if self._validate_signal(signal, market_info):
+                await self._execute_trade(signal, strategy_type, market_info)
     
     def _generate_signal(self, strategy_type, market_info):
         """Generate signal using the appropriate strategy"""
@@ -182,24 +195,20 @@ class TradeEngine:
             else:  # TREND
                 return self.trend_strategy.generate_signal(self.price_data_15m, market_info['condition'])
         except:
+            self.rejections['invalid_signal'] += 1
             return None
     
-    def _validate_signal(self, signal, market_info):
-        """Streamlined signal validation"""
-        return (signal and market_info['condition'] != 'INSUFFICIENT_DATA' and 
-                market_info['confidence'] >= 0.6 and signal.get('confidence', 0) >= 60)
-    
-    async def _execute_trade(self, signal, strategy_type):
-        """Execute trade with fee consideration"""
+    async def _execute_trade(self, signal, strategy_type, market_info):
+        """Execute trade with fee-adjusted calculations"""
         current_price = float(self.price_data_1m['close'].iloc[-1])
         balance = await self.get_account_balance()
         
-        if not balance:
+        if not balance or not self._validate_signal(signal, market_info):
             return
         
         # Calculate position size
         base_qty = self.risk_manager.calculate_position_size(balance, current_price, signal['structure_stop'])
-        sizing_multiplier = self.strategy_manager.get_position_sizing_multiplier(strategy_type, self.market_info)
+        sizing_multiplier = self.strategy_manager.get_position_sizing_multiplier(strategy_type, market_info)
         qty = base_qty * sizing_multiplier
         
         formatted_qty = self.format_quantity(qty)
@@ -209,16 +218,35 @@ class TradeEngine:
         
         try:
             order = self.exchange.place_order(
-                category="linear", symbol=self.symbol,
+                category="linear", 
+                symbol=self.symbol,
                 side="Buy" if signal['action'] == 'BUY' else "Sell",
-                orderType="Market", qty=formatted_qty, timeInForce="IOC"
+                orderType="Market", 
+                qty=formatted_qty, 
+                timeInForce="IOC"
             )
             
             if order.get('retCode') == 0:
+                self.successful_entries += 1
                 self._log_trade("ENTRY", current_price, signal=signal, quantity=formatted_qty, strategy=strategy_type)
                 await self.notifier.send_trade_entry(signal, current_price, formatted_qty, self._get_strategy_info())
         except:
             pass
+    
+    def _validate_signal(self, signal, market_info):
+        """Validate signal quality"""
+        validation_checks = [
+            (not signal or market_info['condition'] == 'INSUFFICIENT_DATA', 'insufficient_data'),
+            (market_info['confidence'] < 0.6, 'invalid_market'),
+            (signal.get('confidence', 0) < 60, 'invalid_signal')
+        ]
+        
+        for condition, rejection_type in validation_checks:
+            if condition:
+                self.rejections[rejection_type] += 1
+                return False
+        
+        return True
     
     async def _check_position_status(self):
         """Check position status"""
@@ -228,17 +256,16 @@ class TradeEngine:
                 return
             
             pos_list = positions['result']['list']
-            has_position = pos_list and float(pos_list[0]['size']) > 0
             
-            if not has_position:
+            if not pos_list or float(pos_list[0]['size']) == 0:
                 if self.position:
                     await self._on_position_closed()
-                self.position = None
-                self.position_start_time = None
-            else:
-                if not self.position:
-                    self.position_start_time = datetime.now()
-                self.position = pos_list[0]
+                self._reset_position()
+                return
+            
+            if not self.position:
+                self.position_start_time = datetime.now()
+            self.position = pos_list[0]
         except:
             pass
     
@@ -253,7 +280,7 @@ class TradeEngine:
         unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
         position_age = (datetime.now() - self.position_start_time).total_seconds()
         
-        # Sync risk manager
+        # Ensure risk manager is synchronized
         if self.risk_manager.active_strategy != self.active_strategy:
             self.risk_manager.set_strategy(self.active_strategy)
         
@@ -283,9 +310,7 @@ class TradeEngine:
             if order.get('retCode') == 0:
                 duration = (datetime.now() - self.position_start_time).total_seconds() if self.position_start_time else 0
                 
-                # Track exit reason
-                self.exit_reasons[reason] = self.exit_reasons.get(reason, 0) + 1
-                
+                self._track_exit_reason(reason)
                 self._log_trade("EXIT", current_price, reason=reason, pnl=pnl, strategy=self.active_strategy)
                 
                 exit_data = {'trigger': reason, 'strategy': self.active_strategy}
@@ -293,7 +318,7 @@ class TradeEngine:
         except:
             pass
     
-    async def _handle_strategy_switch(self):
+    async def _on_strategy_switch(self, old_strategy, new_strategy):
         """Handle strategy switch"""
         if self.position:
             await self._close_position("strategy_switch")
@@ -304,21 +329,34 @@ class TradeEngine:
                 await self._check_position_status()
                 if not self.position:
                     break
-            
+                    
             if self.position:
-                self.position = None
-                self.position_start_time = None
+                self._reset_position()
+        
+        self.exit_reasons['strategy_switch'] += 1
     
     async def _on_position_closed(self):
         """Handle position closed externally"""
         if self.position:
             pnl = float(self.position.get('unrealisedPnl', 0))
             price = float(self.price_data_1m['close'].iloc[-1]) if len(self.price_data_1m) > 0 else 0
-            self.exit_reasons['position_closed'] = self.exit_reasons.get('position_closed', 0) + 1
+            self._track_exit_reason('position_closed')
             self._log_trade("EXIT", price, reason="position_closed", pnl=pnl, strategy=self.active_strategy)
     
+    def _reset_position(self):
+        """Reset position state"""
+        self.position = None
+        self.position_start_time = None
+    
+    def _track_exit_reason(self, reason):
+        """Track exit reason"""
+        if reason in self.exit_reasons:
+            self.exit_reasons[reason] += 1
+        else:
+            self.exit_reasons['manual_exit'] += 1
+    
     def _log_trade(self, action, price, **kwargs):
-        """Streamlined trade logging"""
+        """Log trade data"""
         timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
         
         if action == "ENTRY":
@@ -326,22 +364,25 @@ class TradeEngine:
             signal = kwargs.get('signal', {})
             log_data = {
                 'timestamp': timestamp, 'id': self.trade_id, 'action': 'ENTRY',
-                'strategy': kwargs.get('strategy', 'UNKNOWN'), 'side': signal.get('action', ''),
-                'price': round(price, 2), 'size': kwargs.get('quantity', ''),
-                'condition': self.market_info.get('condition', ''), 'adx': round(self.market_info.get('adx', 0), 1),
+                'strategy': kwargs.get('strategy', 'UNKNOWN'),
+                'side': signal.get('action', ''), 'price': round(price, 2), 
+                'size': kwargs.get('quantity', ''), 'market_condition': self.market_info.get('condition', ''),
+                'adx': round(self.market_info.get('adx', 0), 1),
                 'confidence': round(signal.get('confidence', 0), 1)
             }
         else:
             duration = (datetime.now() - self.position_start_time).total_seconds() if self.position_start_time else 0
             log_data = {
                 'timestamp': timestamp, 'id': self.trade_id, 'action': 'EXIT',
-                'strategy': kwargs.get('strategy', 'UNKNOWN'), 'trigger': kwargs.get('reason', '').replace(' ', '_'),
-                'price': round(price, 2), 'pnl': round(kwargs.get('pnl', 0), 2), 'duration': round(duration, 1)
+                'strategy': kwargs.get('strategy', 'UNKNOWN'),
+                'trigger': kwargs.get('reason', '').lower().replace(' ', '_'),
+                'price': round(price, 2), 'pnl': round(kwargs.get('pnl', 0), 2),
+                'hold_seconds': round(duration, 1)
             }
         
         try:
             with open(self.log_file, "a") as f:
-                f.write(f"{log_data}\n")
+                f.write(json.dumps(log_data) + "\n")
         except:
             pass
     
@@ -359,50 +400,81 @@ class TradeEngine:
     
     def _get_strategy_info(self):
         """Get current strategy information"""
-        if self.active_strategy == "RANGE":
-            return self.range_strategy.get_strategy_info()
-        else:
-            return self.trend_strategy.get_strategy_info()
+        return (self.range_strategy.get_strategy_info() if self.active_strategy == "RANGE" 
+                else self.trend_strategy.get_strategy_info())
     
     def _display_status(self):
-        """Ultra-streamlined status display"""
+        """Display trading status"""
         try:
             price = float(self.price_data_1m['close'].iloc[-1])
             time = self.price_data_1m.index[-1].strftime('%H:%M:%S')
+            symbol_display = self.symbol.replace('USDT', '/USDT')
+            price_formatted = f"{price:,.2f}".replace(',', ' ')
             
-            print("\n" * 50 + "=" * 60)
-            print(f"⚡ {self.symbol} DUAL-STRATEGY BOT")
-            print("=" * 60)
+            print("\n" * 50)
             
-            # Market & Strategy
-            condition = self.market_info.get('condition', 'UNKNOWN')
+            # Header
+            w = 77
+            print(f"{'='*w}\n⚡  {symbol_display} DUAL-STRATEGY TRADING BOT\n{'='*w}\n")
+            
+            # Market condition and strategy
+            market_condition = self.market_info.get('condition', 'UNKNOWN')
             adx = self.market_info.get('adx', 0)
             confidence = self.market_info.get('confidence', 0)
             
-            print(f"📊 {condition} | ADX: {adx:.1f} | Conf: {confidence*100:.0f}% | Strategy: {self.active_strategy or 'NONE'}")
+            print("🧠  MARKET ANALYSIS & STRATEGY SELECTION\n" + "─"*w)
+            print(f"📊 Market Condition: {market_condition:<12} │ 📈 ADX: {adx:>5.1f} │ 🎯 Confidence: {confidence*100:>3.0f}%")
+            print(f"⚙️  Active Strategy: {self.active_strategy or 'NONE':<13} │ 🕐 Timeframe: {self._get_active_timeframe()}")
+            print("─"*w + "\n")
             
-            # Position or Scanner Status
+            # Strategy status with fee info
+            print("📋  STRATEGY STATUS\n" + "─"*w)
+            if self.active_strategy == "RANGE":
+                strategy_info = self.range_strategy.get_strategy_info()
+                position_size = self.risk_manager.range_config['fixed_position_usdt']
+                fee_adjusted_target = self.risk_manager.calculate_fee_adjusted_profit_target(position_size)
+                print(f"🎯 {strategy_info['name']}")
+                print(f"📊 RSI({strategy_info['config']['rsi_length']}) + MFI({strategy_info['config']['mfi_length']}) │ Target: ${fee_adjusted_target:.2f} (fee-adj) │ Hold: {strategy_info['config']['max_hold_seconds']}s")
+            else:
+                strategy_info = self.trend_strategy.get_strategy_info()
+                print(f"📈 {strategy_info['name']}")
+                print(f"📊 RSI({strategy_info['config']['rsi_length']}) + MA({strategy_info['config']['ma_length']}) │ RR: 1:{strategy_info['config']['target_profit_multiplier']} (fee-adj) │ Win Rate: {strategy_info['win_rate']}")
+            print("─"*w + "\n")
+            
+            # Performance metrics
+            print("📊  PERFORMANCE METRICS\n" + "─"*w)
+            total_trades = sum(self.exit_reasons.values())
+            total_signals = self.rejections.get('total_signals', 0)
+            
+            print(f"🔢 Total Trades: {total_trades:>3} │ 📈 Signals: {total_signals:>3} │ ✅ Accept Rate: {(total_trades/max(total_signals,1)*100):>4.1f}%")
+            
+            # Current status
+            print("─"*w + "\n")
+            print(f"⏰ {time}   |   💰 ${price_formatted}")
+            print()
+            
+            # Position info
             if self.position:
                 pnl = float(self.position.get('unrealisedPnl', 0))
                 entry = float(self.position.get('avgPrice', 0))
+                size = self.position.get('size', '0')
                 side = self.position.get('side', '')
+                
+                pnl_pct = (pnl / (float(size) * entry)) * 100 if entry > 0 and size != '0' else 0
                 age = (datetime.now() - self.position_start_time).total_seconds() if self.position_start_time else 0
                 
                 emoji = "🟢" if side == "Buy" else "🔴"
-                print(f"{emoji} {side}: ${entry:.2f} | PnL: ${pnl:.2f} | Age: {age:.0f}s")
+                print(f"{emoji} {side} Position: {size} @ ${entry:.2f} │ Strategy: {self.active_strategy}")
+                print(f"   PnL: ${pnl:.2f} ({pnl_pct:+.2f}%) | Age: {age:.1f}s")
             else:
-                print("⚡ Scanner Active - No Position")
+                print("⚡  No Position — Multi-Strategy Scanner Active")
             
-            print(f"💰 {time} | ${price:.2f}")
-            
-            # Quick stats
-            total_trades = sum(self.exit_reasons.values())
-            total_signals = self.rejections.get('total_signals', 0)
-            if total_trades > 0 or total_signals > 0:
-                rate = (total_trades / max(total_signals, 1)) * 100
-                print(f"📈 Trades: {total_trades} | Rate: {rate:.1f}%")
-            
-            print("-" * 60)
+            print("─" * 60)
             
         except Exception as e:
             print(f"❌ Display error: {e}")
+    
+    def _get_active_timeframe(self):
+        """Get active timeframe string"""
+        timeframes = {"RANGE": "1m", "TREND": "15m"}
+        return timeframes.get(self.active_strategy, "Auto")
