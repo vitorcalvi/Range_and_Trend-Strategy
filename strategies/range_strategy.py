@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Dict, Optional
 
 class RangeStrategy:
-    """RSI+MFI Range-Bound Strategy for sideways markets"""
+    """RSI+MFI Range-Bound Strategy for sideways markets - FIXED"""
     
     def __init__(self):
         self.config = {
@@ -16,9 +16,9 @@ class RangeStrategy:
             "mfi_threshold_strong": 50,
             "overbought": 60,
             "cooldown_seconds": 0.5,
-            "base_profit_usdt": 15,
+            "base_profit_usdt": 35,  # FIXED: Increased from 15 to 35
             "max_hold_seconds": 180,
-            "fee_rate": 0.0011  # 0.11% round-trip fee
+            "fee_rate": 0.0011  # 0.11% round-trip fee (0.055% taker x 2)
         }
         self.last_signal_time = None
         
@@ -72,6 +72,19 @@ class RangeStrategy:
         fee_cost = position_size_usdt * self.config['fee_rate']
         return self.config['base_profit_usdt'] + fee_cost
     
+    def validate_trade_profitability(self, position_size_usdt: float, stop_distance_pct: float) -> bool:
+        """FIXED: Validate trade can be profitable given fees"""
+        fee_cost = position_size_usdt * self.config['fee_rate']
+        gross_profit_needed = self.config['base_profit_usdt'] + fee_cost
+        
+        # Minimum price movement needed for profit
+        min_movement_pct = gross_profit_needed / position_size_usdt
+        
+        # Stop distance should allow for at least 2x the minimum movement
+        max_acceptable_stop_pct = min_movement_pct * 0.5  # 50% of required movement as max stop
+        
+        return stop_distance_pct <= max_acceptable_stop_pct
+    
     def generate_signal(self, data: pd.DataFrame, market_condition: str) -> Optional[Dict]:
         """Generate range trading signals"""
         if len(data) < 20 or self._is_cooldown_active():
@@ -122,6 +135,12 @@ class RangeStrategy:
         if not (0.0005 <= stop_distance <= 0.005):
             return None
         
+        # FIXED: Validate trade profitability before creating signal
+        # Use typical position size for validation
+        typical_position_size = 9000  # Typical range strategy position size
+        if not self.validate_trade_profitability(typical_position_size, stop_distance):
+            return None
+        
         # Calculate confidence
         rsi_strength = abs(50 - rsi)
         mfi_strength = abs(50 - mfi)
@@ -145,7 +164,8 @@ class RangeStrategy:
             'confidence': round(confidence, 1),
             'base_profit_usdt': self.config['base_profit_usdt'],
             'max_hold_seconds': self.config['max_hold_seconds'],
-            'timeframe': '1m'
+            'timeframe': '1m',
+            'required_movement_pct': round((self.config['base_profit_usdt'] + typical_position_size * self.config['fee_rate']) / typical_position_size * 100, 3)
         }
     
     def _is_cooldown_active(self) -> bool:
@@ -157,9 +177,9 @@ class RangeStrategy:
     def get_strategy_info(self) -> Dict:
         """Get strategy information"""
         return {
-            'name': 'RSI+MFI Range Strategy',
+            'name': 'RSI+MFI Range Strategy (Fixed)',
             'type': 'RANGE',
             'timeframe': '1m',
             'config': self.config,
-            'description': 'Mean reversion scalping for range-bound markets'
+            'description': f'Mean reversion scalping - ${self.config["base_profit_usdt"]} net profit target'
         }

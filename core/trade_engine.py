@@ -35,6 +35,8 @@ class TradeEngine:
         self.exchange = None
         self.position = None
         self.position_start_time = None
+        self.position_entry_price = None  # FIXED: Track entry price
+        self.position_size_usdt = None    # FIXED: Track position size in USDT
         
         # Market data
         self.price_data_1m = pd.DataFrame()
@@ -49,11 +51,12 @@ class TradeEngine:
         # Performance tracking
         self.exit_reasons = {
             'profit_target': 0, 'emergency_stop': 0, 'max_hold_time': 0,
-            'trailing_stop': 0, 'strategy_switch': 0, 'manual_exit': 0
+            'trailing_stop': 0, 'strategy_switch': 0, 'manual_exit': 0,
+            'timeout_no_profit': 0  # FIXED: Add timeout tracking
         }
         self.rejections = {
             'invalid_market': 0, 'cooldown_active': 0, 'insufficient_data': 0,
-            'invalid_signal': 0, 'total_signals': 0
+            'invalid_signal': 0, 'total_signals': 0, 'unprofitable': 0  # FIXED: Track unprofitable rejections
         }
         
         self._set_symbol_rules()
@@ -199,7 +202,7 @@ class TradeEngine:
             return None
     
     async def _execute_trade(self, signal, strategy_type, market_info):
-        """Execute trade with fee-adjusted calculations"""
+        """FIXED: Execute trade with proper fee calculations"""
         current_price = float(self.price_data_1m['close'].iloc[-1])
         balance = await self.get_account_balance()
         
@@ -216,6 +219,15 @@ class TradeEngine:
         if formatted_qty == "0" or float(formatted_qty) < 0.001:
             return
         
+        # FIXED: Calculate position size in USDT for fee tracking
+        position_size_usdt = float(formatted_qty) * current_price
+        
+        # FIXED: Pre-validate profitability
+        if not self.risk_manager.validate_trade_profitability(position_size_usdt, 
+                                                             position_size_usdt * 0.02):  # Assume 2% potential
+            self.rejections['unprofitable'] += 1
+            return
+        
         try:
             order = self.exchange.place_order(
                 category="linear", 
@@ -228,13 +240,17 @@ class TradeEngine:
             
             if order.get('retCode') == 0:
                 self.successful_entries += 1
-                self._log_trade("ENTRY", current_price, signal=signal, quantity=formatted_qty, strategy=strategy_type)
+                self.position_entry_price = current_price  # FIXED: Track entry price
+                self.position_size_usdt = position_size_usdt  # FIXED: Track position size
+                
+                self._log_trade("ENTRY", current_price, signal=signal, quantity=formatted_qty, 
+                               strategy=strategy_type, position_size_usdt=position_size_usdt)
                 await self.notifier.send_trade_entry(signal, current_price, formatted_qty, self._get_strategy_info())
         except:
             pass
     
     def _validate_signal(self, signal, market_info):
-        """Validate signal quality"""
+        """FIXED: Enhanced signal validation"""
         validation_checks = [
             (not signal or market_info['condition'] == 'INSUFFICIENT_DATA', 'insufficient_data'),
             (market_info['confidence'] < 0.6, 'invalid_market'),
@@ -265,17 +281,24 @@ class TradeEngine:
             
             if not self.position:
                 self.position_start_time = datetime.now()
+                # Try to get entry price from position data if not tracked
+                if not self.position_entry_price:
+                    self.position_entry_price = float(pos_list[0].get('avgPrice', 0))
+                if not self.position_size_usdt and self.position_entry_price:
+                    qty = float(pos_list[0]['size'])
+                    self.position_size_usdt = qty * self.position_entry_price
+                    
             self.position = pos_list[0]
         except:
             pass
     
     async def _check_position_exit(self):
-        """Check if position should be closed"""
+        """FIXED: Check if position should be closed with accurate PnL"""
         if not self.position or not self.position_start_time:
             return
         
         current_price = float(self.price_data_1m['close'].iloc[-1])
-        entry_price = float(self.position.get('avgPrice', 0))
+        entry_price = self.position_entry_price or float(self.position.get('avgPrice', 0))
         side = self.position.get('side', '')
         unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
         position_age = (datetime.now() - self.position_start_time).total_seconds()
@@ -284,20 +307,27 @@ class TradeEngine:
         if self.risk_manager.active_strategy != self.active_strategy:
             self.risk_manager.set_strategy(self.active_strategy)
         
+        # FIXED: Pass position size for accurate fee calculation
         should_close, reason = self.risk_manager.should_close_position(
-            current_price, entry_price, side, unrealized_pnl, position_age
+            current_price, entry_price, side, unrealized_pnl, position_age, self.position_size_usdt
         )
         
         if should_close:
             await self._close_position(reason)
     
     async def _close_position(self, reason="Manual"):
-        """Close position"""
+        """FIXED: Close position with accurate PnL calculation"""
         if not self.position:
             return
         
         current_price = float(self.price_data_1m['close'].iloc[-1]) if len(self.price_data_1m) > 0 else 0
-        pnl = float(self.position.get('unrealisedPnl', 0))
+        gross_pnl = float(self.position.get('unrealisedPnl', 0))
+        
+        # FIXED: Calculate net PnL after fees
+        net_pnl = gross_pnl
+        if self.position_size_usdt:
+            net_pnl = self.risk_manager.calculate_net_pnl(gross_pnl, self.position_size_usdt)
+        
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
         qty = self.format_quantity(float(self.position['size']))
         
@@ -311,10 +341,11 @@ class TradeEngine:
                 duration = (datetime.now() - self.position_start_time).total_seconds() if self.position_start_time else 0
                 
                 self._track_exit_reason(reason)
-                self._log_trade("EXIT", current_price, reason=reason, pnl=pnl, strategy=self.active_strategy)
+                self._log_trade("EXIT", current_price, reason=reason, pnl=net_pnl, 
+                               gross_pnl=gross_pnl, strategy=self.active_strategy, duration=duration)
                 
                 exit_data = {'trigger': reason, 'strategy': self.active_strategy}
-                await self.notifier.send_trade_exit(exit_data, current_price, pnl, duration, self._get_strategy_info())
+                await self.notifier.send_trade_exit(exit_data, current_price, net_pnl, duration, self._get_strategy_info())
         except:
             pass
     
@@ -338,15 +369,19 @@ class TradeEngine:
     async def _on_position_closed(self):
         """Handle position closed externally"""
         if self.position:
-            pnl = float(self.position.get('unrealisedPnl', 0))
+            gross_pnl = float(self.position.get('unrealisedPnl', 0))
+            net_pnl = self.risk_manager.calculate_net_pnl(gross_pnl, self.position_size_usdt) if self.position_size_usdt else gross_pnl
             price = float(self.price_data_1m['close'].iloc[-1]) if len(self.price_data_1m) > 0 else 0
             self._track_exit_reason('position_closed')
-            self._log_trade("EXIT", price, reason="position_closed", pnl=pnl, strategy=self.active_strategy)
+            self._log_trade("EXIT", price, reason="position_closed", pnl=net_pnl, 
+                           gross_pnl=gross_pnl, strategy=self.active_strategy)
     
     def _reset_position(self):
-        """Reset position state"""
+        """FIXED: Reset position state completely"""
         self.position = None
         self.position_start_time = None
+        self.position_entry_price = None
+        self.position_size_usdt = None
     
     def _track_exit_reason(self, reason):
         """Track exit reason"""
@@ -356,7 +391,7 @@ class TradeEngine:
             self.exit_reasons['manual_exit'] += 1
     
     def _log_trade(self, action, price, **kwargs):
-        """Log trade data"""
+        """FIXED: Enhanced trade logging"""
         timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
         
         if action == "ENTRY":
@@ -368,16 +403,21 @@ class TradeEngine:
                 'side': signal.get('action', ''), 'price': round(price, 2), 
                 'size': kwargs.get('quantity', ''), 'market_condition': self.market_info.get('condition', ''),
                 'adx': round(self.market_info.get('adx', 0), 1),
-                'confidence': round(signal.get('confidence', 0), 1)
+                'confidence': round(signal.get('confidence', 0), 1),
+                'position_size_usdt': round(kwargs.get('position_size_usdt', 0), 2),
+                'estimated_fees': round(kwargs.get('position_size_usdt', 0) * self.risk_manager.fee_rate, 2)
             }
         else:
-            duration = (datetime.now() - self.position_start_time).total_seconds() if self.position_start_time else 0
+            duration = kwargs.get('duration', 0)
             log_data = {
                 'timestamp': timestamp, 'id': self.trade_id, 'action': 'EXIT',
                 'strategy': kwargs.get('strategy', 'UNKNOWN'),
                 'trigger': kwargs.get('reason', '').lower().replace(' ', '_'),
-                'price': round(price, 2), 'pnl': round(kwargs.get('pnl', 0), 2),
-                'hold_seconds': round(duration, 1)
+                'price': round(price, 2), 
+                'gross_pnl': round(kwargs.get('gross_pnl', 0), 2),
+                'net_pnl': round(kwargs.get('pnl', 0), 2),
+                'hold_seconds': round(duration, 1),
+                'fees_paid': round(kwargs.get('gross_pnl', 0) - kwargs.get('pnl', 0), 2) if kwargs.get('gross_pnl') else 0
             }
         
         try:
@@ -404,7 +444,7 @@ class TradeEngine:
                 else self.trend_strategy.get_strategy_info())
     
     def _display_status(self):
-        """Display trading status"""
+        """FIXED: Display trading status with accurate PnL"""
         try:
             price = float(self.price_data_1m['close'].iloc[-1])
             time = self.price_data_1m.index[-1].strftime('%H:%M:%S')
@@ -415,7 +455,7 @@ class TradeEngine:
             
             # Header
             w = 77
-            print(f"{'='*w}\n⚡  {symbol_display} DUAL-STRATEGY TRADING BOT\n{'='*w}\n")
+            print(f"{'='*w}\n⚡  {symbol_display} DUAL-STRATEGY TRADING BOT (FIXED)\n{'='*w}\n")
             
             # Market condition and strategy
             market_condition = self.market_info.get('condition', 'UNKNOWN')
@@ -427,47 +467,61 @@ class TradeEngine:
             print(f"⚙️  Active Strategy: {self.active_strategy or 'NONE':<13} │ 🕐 Timeframe: {self._get_active_timeframe()}")
             print("─"*w + "\n")
             
-            # Strategy status with fee info
-            print("📋  STRATEGY STATUS\n" + "─"*w)
+            # FIXED: Strategy status with accurate fee info
+            print("📋  STRATEGY STATUS (FIXED PROFIT TARGETS)\n" + "─"*w)
             if self.active_strategy == "RANGE":
                 strategy_info = self.range_strategy.get_strategy_info()
                 position_size = self.risk_manager.range_config['fixed_position_usdt']
-                fee_adjusted_target = self.risk_manager.calculate_fee_adjusted_profit_target(position_size)
+                fee_cost = position_size * self.risk_manager.fee_rate
+                gross_target = self.risk_manager.calculate_fee_adjusted_profit_target(position_size)
+                net_target = self.risk_manager.range_config['base_profit_usdt']
                 print(f"🎯 {strategy_info['name']}")
-                print(f"📊 RSI({strategy_info['config']['rsi_length']}) + MFI({strategy_info['config']['mfi_length']}) │ Target: ${fee_adjusted_target:.2f} (fee-adj) │ Hold: {strategy_info['config']['max_hold_seconds']}s")
+                print(f"📊 Target: ${net_target} NET (${gross_target:.2f} gross) │ Fees: ${fee_cost:.2f} │ Hold: {strategy_info['config']['max_hold_seconds']}s")
             else:
                 strategy_info = self.trend_strategy.get_strategy_info()
                 print(f"📈 {strategy_info['name']}")
-                print(f"📊 RSI({strategy_info['config']['rsi_length']}) + MA({strategy_info['config']['ma_length']}) │ RR: 1:{strategy_info['config']['target_profit_multiplier']} (fee-adj) │ Win Rate: {strategy_info['win_rate']}")
+                print(f"📊 RSI({strategy_info['config']['rsi_length']}) + MA({strategy_info['config']['ma_length']}) │ RR: 1:{strategy_info['config']['target_profit_multiplier']} │ Win Rate: {strategy_info['win_rate']}")
             print("─"*w + "\n")
             
-            # Performance metrics
+            # FIXED: Performance metrics with rejection reasons
             print("📊  PERFORMANCE METRICS\n" + "─"*w)
             total_trades = sum(self.exit_reasons.values())
             total_signals = self.rejections.get('total_signals', 0)
+            unprofitable_rejections = self.rejections.get('unprofitable', 0)
             
             print(f"🔢 Total Trades: {total_trades:>3} │ 📈 Signals: {total_signals:>3} │ ✅ Accept Rate: {(total_trades/max(total_signals,1)*100):>4.1f}%")
+            if unprofitable_rejections > 0:
+                print(f"💰 Unprofitable Rejections: {unprofitable_rejections} (Good - avoiding losses!)")
             
             # Current status
             print("─"*w + "\n")
             print(f"⏰ {time}   |   💰 ${price_formatted}")
             print()
             
-            # Position info
+            # FIXED: Position info with net PnL
             if self.position:
-                pnl = float(self.position.get('unrealisedPnl', 0))
-                entry = float(self.position.get('avgPrice', 0))
+                gross_pnl = float(self.position.get('unrealisedPnl', 0))
+                entry = self.position_entry_price or float(self.position.get('avgPrice', 0))
                 size = self.position.get('size', '0')
                 side = self.position.get('side', '')
                 
-                pnl_pct = (pnl / (float(size) * entry)) * 100 if entry > 0 and size != '0' else 0
+                # Calculate net PnL
+                net_pnl = gross_pnl
+                if self.position_size_usdt:
+                    net_pnl = self.risk_manager.calculate_net_pnl(gross_pnl, self.position_size_usdt)
+                    fee_cost = self.position_size_usdt * self.risk_manager.fee_rate
+                else:
+                    fee_cost = 0
+                
+                net_pnl_pct = (net_pnl / (float(size) * entry)) * 100 if entry > 0 and size != '0' else 0
                 age = (datetime.now() - self.position_start_time).total_seconds() if self.position_start_time else 0
                 
                 emoji = "🟢" if side == "Buy" else "🔴"
                 print(f"{emoji} {side} Position: {size} @ ${entry:.2f} │ Strategy: {self.active_strategy}")
-                print(f"   PnL: ${pnl:.2f} ({pnl_pct:+.2f}%) | Age: {age:.1f}s")
+                print(f"   Gross PnL: ${gross_pnl:.2f} │ Fees: ${fee_cost:.2f} │ NET PnL: ${net_pnl:.2f} ({net_pnl_pct:+.2f}%)")
+                print(f"   Age: {age:.1f}s │ Max Hold: {self.risk_manager.get_max_position_time()}s")
             else:
-                print("⚡  No Position — Multi-Strategy Scanner Active")
+                print("⚡  No Position — Fee-Aware Multi-Strategy Scanner Active")
             
             print("─" * 60)
             
