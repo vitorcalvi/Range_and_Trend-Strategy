@@ -207,7 +207,7 @@ class TradeEngine:
         return True
     
     async def _execute_trade(self, signal, strategy_type, market_info):
-        """Execute trade with fee-aware position sizing"""
+        """FIXED: Execute trade with proper fee-aware position sizing"""
         current_price = float(self.price_data_1m['close'].iloc[-1])
         balance = await self.get_account_balance()
         
@@ -232,6 +232,9 @@ class TradeEngine:
         # Calculate actual position size for fee tracking
         position_size_usdt = float(formatted_qty) * current_price
         
+        # FIXED: Calculate break-even fees properly
+        break_even_fees = self.risk_manager.get_break_even_pnl(position_size_usdt)
+        
         try:
             order = self.exchange.place_order(
                 category="linear", 
@@ -248,8 +251,6 @@ class TradeEngine:
                 self.position_size_usdt = position_size_usdt
                 
                 # Log with fee information
-                break_even_fees = float(self.risk_manager.get_break_even_pnl(position_size_usdt))
-                
                 self._log_trade("ENTRY", current_price, signal=signal, quantity=formatted_qty, 
                                strategy=strategy_type, position_size_usdt=position_size_usdt,
                                break_even_fees=break_even_fees)
@@ -287,7 +288,7 @@ class TradeEngine:
             pass
     
     async def _check_position_exit(self):
-        """Fee-aware position exit checking"""
+        """FIXED: Fee-aware position exit checking"""
         if not self.position or not self.position_start_time:
             return
         
@@ -307,7 +308,7 @@ class TradeEngine:
         if self.risk_manager.active_strategy != self.active_strategy:
             self.risk_manager.set_strategy(self.active_strategy)
         
-        # Fee-aware exit decision
+        # FIXED: Pass position_size_usdt to fee-aware exit decision
         should_close, reason = self.risk_manager.should_close_position(
             current_price, entry_price, side, unrealized_pnl, position_age, position_size_usdt
         )
@@ -316,7 +317,7 @@ class TradeEngine:
             await self._close_position(reason)
     
     async def _close_position(self, reason="Manual"):
-        """Close position and log with fee information"""
+        """FIXED: Close position and log with proper fee information"""
         if not self.position:
             return
         
@@ -386,12 +387,13 @@ class TradeEngine:
             self.exit_reasons['manual_exit'] += 1
     
     def _log_trade(self, action, price, **kwargs):
-        """Enhanced trade logging with fee information"""
+        """FIXED: Enhanced trade logging with proper fee information"""
         timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
         
         if action == "ENTRY":
             self.trade_id += 1
             signal = kwargs.get('signal', {})
+            position_size_usdt = kwargs.get('position_size_usdt', 0)
             break_even_fees = kwargs.get('break_even_fees', 0)
             
             log_data = {
@@ -402,21 +404,22 @@ class TradeEngine:
                 'market_condition': self.market_info.get('condition', ''),
                 'adx': round(self.market_info.get('adx', 0), 1),
                 'confidence': round(signal.get('confidence', 0), 1),
-                'position_size_usdt': round(kwargs.get('position_size_usdt', 0), 2),
+                'position_size_usdt': round(position_size_usdt, 2),
                 'break_even_fees': round(break_even_fees, 2),
                 'note': f'Need ${break_even_fees:.2f} profit to cover 0.11% fees'
             }
         else:
             duration = kwargs.get('duration', 0)
             bybit_pnl = kwargs.get('bybit_unrealized_pnl', 0)
+            position_size_usdt = kwargs.get('position_size_usdt', 0)
             
-            # Calculate estimated net profit (approximation)
-            position_size = kwargs.get('position_size_usdt', 0)
-            if position_size > 0:
-                break_even_fees = float(self.risk_manager.get_break_even_pnl(position_size))
+            # FIXED: Calculate estimated net profit properly
+            if position_size_usdt > 0:
+                break_even_fees = self.risk_manager.get_break_even_pnl(position_size_usdt)
                 estimated_net = bybit_pnl - break_even_fees
             else:
                 estimated_net = bybit_pnl
+                break_even_fees = 0
             
             log_data = {
                 'timestamp': timestamp, 'id': self.trade_id, 'action': 'EXIT',
@@ -424,6 +427,7 @@ class TradeEngine:
                 'trigger': kwargs.get('reason', '').lower().replace(' ', '_'),
                 'price': round(price, 2), 
                 'bybit_unrealized_pnl': round(bybit_pnl, 2),
+                'estimated_fees': round(break_even_fees, 2),
                 'estimated_net_profit': round(estimated_net, 2),
                 'hold_seconds': round(duration, 1),
                 'note': 'Estimated net = unrealized_pnl - fees (0.11%)'
@@ -453,7 +457,7 @@ class TradeEngine:
                 else self.trend_strategy.get_strategy_info())
     
     def _display_status(self):
-        """Display enhanced status with fee information"""
+        """FIXED: Display enhanced status with proper fee information"""
         try:
             price = float(self.price_data_1m['close'].iloc[-1])
             time = self.price_data_1m.index[-1].strftime('%H:%M:%S')
@@ -502,19 +506,18 @@ class TradeEngine:
             print(f"⏰ {time}   |   💰 ${price_formatted}")
             print()
             
-            # Position info with fee calculations
+            # FIXED: Position info with proper fee calculations
             if self.position:
                 unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
                 entry = self.position_entry_price or float(self.position.get('avgPrice', 0))
                 size = self.position.get('size', '0')
                 side = self.position.get('side', '')
                 
-                pnl_pct = (unrealized_pnl / (float(size) * entry)) * 100 if entry > 0 and size != '0' else 0
                 age = (datetime.now() - self.position_start_time).total_seconds() if self.position_start_time else 0
                 
-                # Calculate fee-aware metrics
+                # FIXED: Calculate fee-aware metrics properly
                 position_size_usdt = self.position_size_usdt or (float(size) * entry)
-                break_even_fees = float(self.risk_manager.get_break_even_pnl(position_size_usdt))
+                break_even_fees = self.risk_manager.get_break_even_pnl(position_size_usdt)
                 net_pnl = unrealized_pnl - break_even_fees
                 
                 emoji = "🟢" if side == "Buy" else "🔴"
