@@ -13,52 +13,82 @@ import os
 # Add the project root to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-def create_market_data(market_type="range", periods=200, base_price=2000):
-    """Create test market data for different conditions"""
+def create_market_data(market_type="range", periods=200, base_price=2000.0):
+    """Create test market data for different conditions - FIXED VERSION"""
     np.random.seed(42)  # Reproducible results
     
     timestamps = pd.date_range(start='2024-01-01', periods=periods, freq='1min')
     
+    # Use much smaller changes to prevent overflow
     if market_type == "range":
-        # Sideways market - low ADX
-        price_changes = np.random.normal(0, 0.0008, periods)  # Small changes
+        # Sideways market - low ADX, bounded between 1900-2100
         prices = [base_price]
         for i in range(1, periods):
-            # Add mean reversion to keep price in range
-            reversion = (base_price - prices[-1]) * 0.02
-            change = price_changes[i] + reversion
-            prices.append(prices[-1] * (1 + change))
+            # Strong mean reversion to keep in range
+            distance_from_center = prices[-1] - base_price
+            reversion = -distance_from_center * 0.001  # Pull back to center
+            noise = np.random.normal(0, 0.5)  # Small random noise
+            
+            # Calculate new price with bounds
+            new_price = prices[-1] + reversion + noise
+            new_price = max(1900.0, min(2100.0, new_price))  # Hard bounds
+            prices.append(new_price)
     
     elif market_type == "trend":
-        # Trending market - high ADX
-        price_changes = np.random.normal(0.003, 0.001, periods)  # Strong upward bias
+        # Trending market - high ADX, gradual uptrend
         prices = [base_price]
+        trend_strength = 0.2  # Small consistent trend
         for i in range(1, periods):
-            prices.append(prices[-1] * (1 + price_changes[i]))
+            # Consistent upward bias with some noise
+            trend_component = trend_strength
+            noise = np.random.normal(0, 0.3)
+            
+            new_price = prices[-1] + trend_component + noise
+            new_price = max(1000.0, min(5000.0, new_price))  # Reasonable bounds
+            prices.append(new_price)
     
     else:  # volatile
-        # High volatility market
-        price_changes = np.random.normal(0, 0.004, periods)
+        # High volatility but bounded
         prices = [base_price]
         for i in range(1, periods):
-            prices.append(prices[-1] * (1 + price_changes[i]))
+            # Higher volatility but controlled
+            change = np.random.normal(0, 2.0)  # Larger noise
+            new_price = prices[-1] + change
+            new_price = max(1500.0, min(2500.0, new_price))  # Keep bounded
+            prices.append(new_price)
     
-    # Create OHLCV data
+    # Validate all prices are finite
+    prices = np.array(prices)
+    if not np.all(np.isfinite(prices)):
+        print("❌ Invalid prices generated, using fallback")
+        prices = np.linspace(base_price * 0.95, base_price * 1.05, periods)
+    
+    # Create OHLCV data with small spread
     data = []
     for i, price in enumerate(prices):
-        high = price * (1 + abs(np.random.normal(0, 0.0005)))
-        low = price * (1 - abs(np.random.normal(0, 0.0005)))
+        spread = abs(np.random.normal(0, 0.1))  # Very small spread
+        high = price + spread
+        low = price - spread
         volume = np.random.uniform(1000, 10000)
         
         data.append({
             'open': prices[i-1] if i > 0 else price,
-            'high': max(high, price),
-            'low': min(low, price),
+            'high': high,
+            'low': low,
             'close': price,
             'volume': volume
         })
     
-    return pd.DataFrame(data, index=timestamps)
+    df = pd.DataFrame(data, index=timestamps)
+    
+    # Final validation - ensure no NaN/infinity values
+    for col in ['open', 'high', 'low', 'close']:
+        if not np.all(np.isfinite(df[col])):
+            print(f"❌ Invalid values in {col}, fixing...")
+            df[col] = df[col].fillna(base_price)
+            df[col] = np.where(np.isinf(df[col]), base_price, df[col])
+    
+    return df
 
 def test_market_switching():
     """Test the market switching functionality"""
