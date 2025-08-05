@@ -39,9 +39,9 @@ class TradeEngine:
         self.position_entry_price = None
         self.position_size_usdt = None
         
-        # Market data
-        self.price_data_1m = pd.DataFrame()
-        self.price_data_15m = pd.DataFrame()
+        # Market data - 3-minute timeframes
+        self.price_data_3m = pd.DataFrame()
+        self.price_data_3m_secondary = pd.DataFrame()  # Secondary 3m for confirmation
         
         # State tracking
         self.trade_id = 0
@@ -62,7 +62,7 @@ class TradeEngine:
         
         self._set_symbol_rules()
         os.makedirs("logs", exist_ok=True)
-        self.log_file = "logs/trades.log"
+        self.log_file = "logs/trades_3m.log"
     
     def _set_symbol_rules(self):
         """Set symbol-specific trading rules"""
@@ -101,8 +101,8 @@ class TradeEngine:
             return f"{qty:.3f}"
     
     async def run_cycle(self):
-        """Run one trading cycle"""
-        if not await self._update_market_data():
+        """Run one 3-minute trading cycle"""
+        if not await self._update_market_data_3m():
             return
         
         await self._check_position_status()
@@ -113,24 +113,26 @@ class TradeEngine:
         if not self.position:
             await self._generate_and_execute_signal()
         
-        self._display_status()
+        self._display_status_3m()
     
-    async def _update_market_data(self):
-        """Update both 1m and 15m market data"""
+    async def _update_market_data_3m(self):
+        """Update 3-minute market data"""
         try:
-            klines_1m = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="1", limit=200)
-            klines_15m = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="15", limit=100)
+            # Primary 3m data for main analysis
+            klines_3m = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="3", limit=100)
+            # Secondary 3m data for confirmation (slightly offset)
+            klines_3m_secondary = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="3", limit=60)
             
-            if klines_1m.get('retCode') != 0 or klines_15m.get('retCode') != 0:
+            if klines_3m.get('retCode') != 0 or klines_3m_secondary.get('retCode') != 0:
                 return False
             
-            self.price_data_1m = self._process_kline_data(klines_1m['result']['list'])
-            self.price_data_15m = self._process_kline_data(klines_15m['result']['list'])
+            self.price_data_3m = self._process_kline_data(klines_3m['result']['list'])
+            self.price_data_3m_secondary = self._process_kline_data(klines_3m_secondary['result']['list'])
             
-            return (len(self.price_data_1m) > 50 and 
-                   len(self.price_data_15m) > 30 and
-                   not self.price_data_1m['close'].isna().any() and
-                   not self.price_data_15m['close'].isna().any())
+            return (len(self.price_data_3m) > 30 and 
+                   len(self.price_data_3m_secondary) > 20 and
+                   not self.price_data_3m['close'].isna().any() and
+                   not self.price_data_3m_secondary['close'].isna().any())
         except:
             return False
     
@@ -155,19 +157,20 @@ class TradeEngine:
         return df.sort_values('timestamp').set_index('timestamp')
     
     async def _generate_and_execute_signal(self):
-        """FIXED: Generate signals with proper cooldowns"""
+        """3-Minute Trading: Generate signals with faster cooldowns"""
         strategy_type, market_info = self.strategy_manager.select_strategy(
-            self.price_data_1m, self.price_data_15m
+            self.price_data_3m, self.price_data_3m_secondary
         )
         
         self.market_info = market_info
         
-        # FIXED: Check trade cooldown before generating signals
+        # 3m trading: Shorter cooldowns (5 minutes between trades)
         if not market_info.get('trade_allowed', False):
             cooldown_remaining = market_info.get('trade_cooldown_remaining', 0)
-            if cooldown_remaining > 60:  # Only show if > 1 minute remaining
+            if cooldown_remaining > 30:  # Only show if > 30 seconds remaining
                 minutes = int(cooldown_remaining / 60)
-                print(f"⏳ Trade cooldown: {minutes}m remaining")
+                seconds = int(cooldown_remaining % 60)
+                print(f"⏳ Trade cooldown: {minutes}m {seconds}s remaining")
             return
         
         # Handle strategy switching
@@ -182,30 +185,31 @@ class TradeEngine:
             )
         
         self.active_strategy = strategy_type
-        signal = self._generate_signal(strategy_type, market_info)
+        signal = self._generate_signal_3m(strategy_type, market_info)
         
         if signal:
             self.rejections['total_signals'] += 1
-            if self._validate_signal(signal, market_info):
-                await self._execute_trade(signal, strategy_type, market_info)
+            if self._validate_signal_3m(signal, market_info):
+                await self._execute_trade_3m(signal, strategy_type, market_info)
     
-    def _generate_signal(self, strategy_type, market_info):
-        """Generate signal using the appropriate strategy"""
+    def _generate_signal_3m(self, strategy_type, market_info):
+        """Generate signal using 3-minute data"""
         try:
+            # Both strategies use 3m data for fast execution
             if strategy_type == "RANGE":
-                return self.range_strategy.generate_signal(self.price_data_1m, market_info['condition'])
+                return self.range_strategy.generate_signal(self.price_data_3m, market_info['condition'])
             else:  # TREND
-                return self.trend_strategy.generate_signal(self.price_data_15m, market_info['condition'])
+                return self.trend_strategy.generate_signal(self.price_data_3m, market_info['condition'])
         except:
             self.rejections['invalid_signal'] += 1
             return None
     
-    def _validate_signal(self, signal, market_info):
-        """Enhanced signal validation"""
+    def _validate_signal_3m(self, signal, market_info):
+        """Enhanced signal validation for 3m trading"""
         validation_checks = [
             (not signal or market_info['condition'] == 'INSUFFICIENT_DATA', 'insufficient_data'),
-            (market_info['confidence'] < 0.6, 'invalid_market'),
-            (signal.get('confidence', 0) < 60, 'invalid_signal')
+            (market_info['confidence'] < 0.65, 'invalid_market'),  # Higher confidence for 3m
+            (signal.get('confidence', 0) < 65, 'invalid_signal')   # Higher confidence threshold
         ]
         
         for condition, rejection_type in validation_checks:
@@ -215,20 +219,20 @@ class TradeEngine:
         
         return True
     
-    async def _execute_trade(self, signal, strategy_type, market_info):
-        """FIXED: Execute trade with correct position sizing"""
-        current_price = float(self.price_data_1m['close'].iloc[-1])
+    async def _execute_trade_3m(self, signal, strategy_type, market_info):
+        """Execute 3-minute trade with $3,817 position sizing"""
+        current_price = float(self.price_data_3m['close'].iloc[-1])
         balance = await self.get_account_balance()
         
-        if not balance or not self._validate_signal(signal, market_info):
+        if not balance or not self._validate_signal_3m(signal, market_info):
             return
         
-        # FIXED: Use risk manager's target position size (should be $2,381)
+        # 3m trading: $3,817 position size
         base_qty = self.risk_manager.calculate_position_size(
             balance, current_price, signal['structure_stop']
         )
         
-        # FIXED: More conservative sizing multiplier
+        # More conservative sizing multiplier for 3m
         sizing_multiplier = self.strategy_manager.get_position_sizing_multiplier(
             strategy_type, market_info
         )
@@ -243,10 +247,10 @@ class TradeEngine:
         # Calculate actual position size
         position_size_usdt = float(formatted_qty) * current_price
         
-        # FIXED: Validate position size is reasonable
-        if position_size_usdt > 3000:  # Cap at $3,000
-            print(f"❌ Position too large: ${position_size_usdt:.2f}, capping at $3,000")
-            qty = 3000 / current_price
+        # Validate position size for 3m trading (cap at $4,000)
+        if position_size_usdt > 4000:
+            print(f"❌ Position too large: ${position_size_usdt:.2f}, capping at $4,000")
+            qty = 4000 / current_price
             formatted_qty = self.format_quantity(qty)
             position_size_usdt = float(formatted_qty) * current_price
         
@@ -263,21 +267,21 @@ class TradeEngine:
             )
             
             if order.get('retCode') == 0:
-                # FIXED: Record trade time for cooldown
+                # Record trade time for 3m cooldown (5 minutes)
                 self.strategy_manager.record_trade()
                 
                 self.successful_entries += 1
                 self.position_entry_price = current_price
                 self.position_size_usdt = position_size_usdt
                 
-                self._log_trade("ENTRY", current_price, signal=signal, quantity=formatted_qty, 
-                               strategy=strategy_type, position_size_usdt=position_size_usdt,
-                               break_even_fees=break_even_fees)
+                self._log_trade_3m("ENTRY", current_price, signal=signal, quantity=formatted_qty, 
+                                  strategy=strategy_type, position_size_usdt=position_size_usdt,
+                                  break_even_fees=break_even_fees)
                                
                 await self.notifier.send_trade_entry(signal, current_price, formatted_qty, 
                                                    self._get_strategy_info())
                 
-                print(f"✅ Trade executed: {signal['action']} {formatted_qty} @ ${current_price:.2f}")
+                print(f"✅ 3M Trade: {signal['action']} {formatted_qty} @ ${current_price:.2f}")
                 print(f"   Position: ${position_size_usdt:.2f} | Break-even: ${break_even_fees:.2f}")
                 
         except Exception as e:
@@ -311,11 +315,11 @@ class TradeEngine:
             pass
     
     async def _check_position_exit(self):
-        """FIXED: Fee-aware position exit checking"""
+        """3-Minute Trading: Fast exit checking"""
         if not self.position or not self.position_start_time:
             return
         
-        current_price = float(self.price_data_1m['close'].iloc[-1])
+        current_price = float(self.price_data_3m['close'].iloc[-1])
         entry_price = self.position_entry_price or float(self.position.get('avgPrice', 0))
         side = self.position.get('side', '')
         
@@ -331,7 +335,7 @@ class TradeEngine:
         if self.risk_manager.active_strategy != self.active_strategy:
             self.risk_manager.set_strategy(self.active_strategy)
         
-        # FIXED: Pass position_size_usdt to fee-aware exit decision
+        # Fast 3m exit decision
         should_close, reason = self.risk_manager.should_close_position(
             current_price, entry_price, side, unrealized_pnl, position_age, position_size_usdt
         )
@@ -340,11 +344,11 @@ class TradeEngine:
             await self._close_position(reason)
     
     async def _close_position(self, reason="Manual"):
-        """FIXED: Close position and log with proper fee information"""
+        """Close 3m position and log"""
         if not self.position:
             return
         
-        current_price = float(self.price_data_1m['close'].iloc[-1]) if len(self.price_data_1m) > 0 else 0
+        current_price = float(self.price_data_3m['close'].iloc[-1]) if len(self.price_data_3m) > 0 else 0
         unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
         
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
@@ -361,9 +365,9 @@ class TradeEngine:
                 
                 self._track_exit_reason(reason)
                 
-                self._log_trade("EXIT", current_price, reason=reason, bybit_unrealized_pnl=unrealized_pnl, 
-                               strategy=self.active_strategy, duration=duration, 
-                               position_size_usdt=self.position_size_usdt or 0)
+                self._log_trade_3m("EXIT", current_price, reason=reason, bybit_unrealized_pnl=unrealized_pnl, 
+                                  strategy=self.active_strategy, duration=duration, 
+                                  position_size_usdt=self.position_size_usdt or 0)
                 
                 exit_data = {'trigger': reason, 'strategy': self.active_strategy}
                 await self.notifier.send_trade_exit(exit_data, current_price, unrealized_pnl, duration, self._get_strategy_info())
@@ -390,10 +394,10 @@ class TradeEngine:
         """Handle position closed externally"""
         if self.position:
             unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
-            price = float(self.price_data_1m['close'].iloc[-1]) if len(self.price_data_1m) > 0 else 0
+            price = float(self.price_data_3m['close'].iloc[-1]) if len(self.price_data_3m) > 0 else 0
             self._track_exit_reason('position_closed')
-            self._log_trade("EXIT", price, reason="position_closed", bybit_unrealized_pnl=unrealized_pnl, 
-                           strategy=self.active_strategy, position_size_usdt=self.position_size_usdt or 0)
+            self._log_trade_3m("EXIT", price, reason="position_closed", bybit_unrealized_pnl=unrealized_pnl, 
+                              strategy=self.active_strategy, position_size_usdt=self.position_size_usdt or 0)
     
     def _reset_position(self):
         """Reset position state"""
@@ -409,8 +413,8 @@ class TradeEngine:
         else:
             self.exit_reasons['manual_exit'] += 1
     
-    def _log_trade(self, action, price, **kwargs):
-        """FIXED: Enhanced trade logging with proper fee information"""
+    def _log_trade_3m(self, action, price, **kwargs):
+        """3-Minute trading log with proper fees"""
         timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
         
         if action == "ENTRY":
@@ -421,7 +425,7 @@ class TradeEngine:
             
             log_data = {
                 'timestamp': timestamp, 'id': self.trade_id, 'action': 'ENTRY',
-                'strategy': kwargs.get('strategy', 'UNKNOWN'),
+                'strategy': kwargs.get('strategy', 'UNKNOWN'), 'timeframe': '3m',
                 'side': signal.get('action', ''), 'price': round(price, 2), 
                 'size': kwargs.get('quantity', ''), 
                 'market_condition': self.market_info.get('condition', ''),
@@ -429,14 +433,13 @@ class TradeEngine:
                 'confidence': round(signal.get('confidence', 0), 1),
                 'position_size_usdt': round(position_size_usdt, 2),
                 'break_even_fees': round(break_even_fees, 2),
-                'note': f'Need ${break_even_fees:.2f} profit to cover 0.11% fees'
+                'note': f'3m trading: Need ${break_even_fees:.2f} profit to cover 0.11% fees'
             }
         else:
             duration = kwargs.get('duration', 0)
             bybit_pnl = kwargs.get('bybit_unrealized_pnl', 0)
             position_size_usdt = kwargs.get('position_size_usdt', 0)
             
-            # FIXED: Calculate estimated net profit properly
             if position_size_usdt > 0:
                 break_even_fees = self.risk_manager.get_break_even_pnl(position_size_usdt)
                 estimated_net = bybit_pnl - break_even_fees
@@ -446,14 +449,14 @@ class TradeEngine:
             
             log_data = {
                 'timestamp': timestamp, 'id': self.trade_id, 'action': 'EXIT',
-                'strategy': kwargs.get('strategy', 'UNKNOWN'),
+                'strategy': kwargs.get('strategy', 'UNKNOWN'), 'timeframe': '3m',
                 'trigger': kwargs.get('reason', '').lower().replace(' ', '_'),
                 'price': round(price, 2), 
                 'bybit_unrealized_pnl': round(bybit_pnl, 2),
                 'estimated_fees': round(break_even_fees, 2),
                 'estimated_net_profit': round(estimated_net, 2),
                 'hold_seconds': round(duration, 1),
-                'note': 'Estimated net = unrealized_pnl - fees (0.11%)'
+                'note': '3m trading: Estimated net = unrealized_pnl - fees (0.11%)'
             }
         
         try:
@@ -479,57 +482,54 @@ class TradeEngine:
         return (self.range_strategy.get_strategy_info() if self.active_strategy == "RANGE" 
                 else self.trend_strategy.get_strategy_info())
     
-    def _display_status(self):
-        """FIXED: Display with cooldown info"""
+    def _display_status_3m(self):
+        """3-Minute Trading Display"""
         try:
-            price = float(self.price_data_1m['close'].iloc[-1])
-            time = self.price_data_1m.index[-1].strftime('%H:%M:%S')
+            price = float(self.price_data_3m['close'].iloc[-1])
+            time = self.price_data_3m.index[-1].strftime('%H:%M:%S')
             symbol_display = self.symbol.replace('USDT', '/USDT')
             price_formatted = f"{price:,.2f}".replace(',', ' ')
             
             print("\n" * 50)
             
             w = 77
-            print(f"{'='*w}\n⚡  {symbol_display} DUAL-STRATEGY BOT (FIXED COOLDOWNS v2.1)\n{'='*w}\n")
+            print(f"{'='*w}\n⚡  {symbol_display} 3-MINUTE TRADING BOT v3.0\n{'='*w}\n")
             
             market_condition = self.market_info.get('condition', 'UNKNOWN')
             adx = self.market_info.get('adx', 0)
             confidence = self.market_info.get('confidence', 0)
             
-            print("🧠  MARKET ANALYSIS & STRATEGY SELECTION\n" + "─"*w)
+            print("🧠  3-MINUTE MARKET ANALYSIS\n" + "─"*w)
             print(f"📊 Market Condition: {market_condition:<12} │ 📈 ADX: {adx:>5.1f} │ 🎯 Confidence: {confidence*100:>3.0f}%")
-            print(f"⚙️  Active Strategy: {self.active_strategy or 'NONE':<13} │ 🕐 Timeframe: {self._get_active_timeframe()}")
+            print(f"⚙️  Active Strategy: {self.active_strategy or 'NONE':<13} │ 🕐 Timeframe: 3m")
             
-            # FIXED: Show cooldown status
+            # Show cooldown status
             trade_cooldown = self.market_info.get('trade_cooldown_remaining', 0)
             if trade_cooldown > 0:
                 minutes = int(trade_cooldown / 60)
                 seconds = int(trade_cooldown % 60)
                 print(f"⏳ Trade Cooldown: {minutes}m {seconds}s remaining")
             else:
-                print("✅ Ready for new trades")
+                print("✅ Ready for 3m trades")
                 
             print("─"*w + "\n")
             
-            print("📋  STRATEGY STATUS (FIXED SIZING)\n" + "─"*w)
+            print("📋  3-MINUTE STRATEGY STATUS\n" + "─"*w)
             if self.active_strategy == "RANGE":
-                strategy_info = self.range_strategy.get_strategy_info()
-                target_size = self.risk_manager.range_config['fixed_position_usdt']
-                print(f"🎯 {strategy_info['name']}")
-                print(f"📊 Target Position: ${target_size} (was using ${int(3750)} - FIXED)")
+                print(f"🎯 3m Range Strategy: RSI+BB (Fast Scalping)")
+                print(f"📊 Position Size: $3,817 │ Target: $92 (2.4%)")
             else:
-                strategy_info = self.trend_strategy.get_strategy_info()
-                target_size = self.risk_manager.trend_config['fixed_position_usdt']
-                print(f"📈 {strategy_info['name']}")
-                print(f"📊 Max Position: ${target_size} (was using ${int(3750)} - FIXED)")
+                print(f"📈 3m Trend Strategy: EMA+RSI (Quick Momentum)")
+                print(f"📊 Position Size: $3,817 │ RR: 1:2.5")
                 
+            print(f"⏰ Max Hold: 45 minutes │ Emergency Stop: 1.2%")
             print("─"*w + "\n")
             
-            print("📊  PERFORMANCE METRICS\n" + "─"*w)
+            print("📊  3-MINUTE PERFORMANCE\n" + "─"*w)
             total_trades = sum(self.exit_reasons.values())
             total_signals = self.rejections.get('total_signals', 0)
             print(f"🔢 Total Trades: {total_trades:>3} │ 📈 Signals: {total_signals:>3} │ ✅ Accept Rate: {(total_trades/max(total_signals,1)*100):>4.1f}%")
-            print(f"📝 Check logs/trades.log for detailed profit tracking")
+            print(f"📝 Log: logs/trades_3m.log")
             
             print("─"*w + "\n")
             print(f"⏰ {time}   |   💰 ${price_formatted}")
@@ -549,11 +549,11 @@ class TradeEngine:
                 net_pnl = unrealized_pnl - break_even_fees
                 
                 emoji = "🟢" if side == "Buy" else "🔴"
-                print(f"{emoji} {side} Position: {size} @ ${entry:.2f} │ Strategy: {self.active_strategy}")
+                print(f"{emoji} 3m {side}: {size} @ ${entry:.2f} │ Strategy: {self.active_strategy}")
                 print(f"   Gross PnL: ${unrealized_pnl:.2f} │ Fees: ${break_even_fees:.2f} │ Net: ${net_pnl:.2f}")
-                print(f"   Age: {age:.1f}s │ Max Hold: {self.risk_manager.get_max_position_time()}s")
+                print(f"   Age: {age:.1f}s │ Max: 2700s (45min)")
             else:
-                print("⚡  No Position — FIXED Scanner Active (10min cooldowns)")
+                print("⚡  No Position — 3-Minute Scanner Active (5min cooldowns)")
             
             print("─" * 60)
             
@@ -562,5 +562,4 @@ class TradeEngine:
     
     def _get_active_timeframe(self):
         """Get active timeframe string"""
-        timeframes = {"RANGE": "1m", "TREND": "15m"}
-        return timeframes.get(self.active_strategy, "Auto")
+        return "3m"
