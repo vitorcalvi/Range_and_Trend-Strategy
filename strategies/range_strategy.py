@@ -36,8 +36,8 @@ class RangeStrategy:
             "bb_squeeze_detection": True, # Breakout signal enhancement
             "dynamic_rsi_levels": True,   # Volatility-adjusted RSI
             
-            # FEE MODEL (ULTRA-AGGRESSIVE)
-            "fee_rate": 0.000615         # 0.0615% total cost (blended + slippage)
+            # FEE MODEL (ULTRA-AGGRESSIVE) - Corrected 2025 rates
+            "fee_rate": 0.00086         # 0.086% total cost (corrected)
         }
         self.last_signal_time = None
         
@@ -47,21 +47,42 @@ class RangeStrategy:
         if len(prices) < period + 3:  # Reduced minimum data requirement
             return 50.0
         
-        delta = prices.diff().fillna(0)
-        gain = delta.where(delta > 0, 0)
-        loss = (-delta.where(delta < 0, 0))
-        
-        # Use SMA for first calculation, then EMA
-        alpha = 1.0 / period
-        avg_gain = gain.ewm(alpha=alpha, min_periods=period).mean().iloc[-1]
-        avg_loss = loss.ewm(alpha=alpha, min_periods=period).mean().iloc[-1]
-        
-        if avg_loss == 0:
-            return 95.0
-        
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        return np.clip(rsi, 5, 95)
+        try:
+            # Ensure prices are not None and are numeric
+            prices = prices.dropna()
+            if len(prices) < period + 3:
+                return 50.0
+            
+            delta = prices.diff().fillna(0)
+            gain = delta.where(delta > 0, 0)
+            loss = (-delta.where(delta < 0, 0))
+            
+            # Use SMA for first calculation, then EMA
+            alpha = 1.0 / period
+            avg_gain = gain.ewm(alpha=alpha, min_periods=period).mean().iloc[-1]
+            avg_loss = loss.ewm(alpha=alpha, min_periods=period).mean().iloc[-1]
+            
+            # Check for None values
+            if avg_gain is None or avg_loss is None or pd.isna(avg_gain) or pd.isna(avg_loss):
+                return 50.0
+            
+            avg_gain = float(avg_gain)
+            avg_loss = float(avg_loss)
+            
+            if avg_loss == 0:
+                return 95.0
+            
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+            
+            # Ensure result is not None
+            if rsi is None or pd.isna(rsi):
+                return 50.0
+                
+            return np.clip(float(rsi), 5, 95)
+        except Exception as e:
+            print(f"❌ RSI calculation error: {e}")
+            return 50.0
     
     def calculate_bollinger_position(self, prices: pd.Series) -> tuple:
         """Calculate BB(15, 1.8) position - Ultra-sensitive"""
@@ -71,23 +92,44 @@ class RangeStrategy:
         if len(prices) < period:
             return 0.5, 0
         
-        sma = prices.rolling(period).mean().iloc[-1]
-        std = prices.rolling(period).std().iloc[-1]
-        current_price = prices.iloc[-1]
-        
-        if pd.isna(sma) or pd.isna(std) or std == 0:
+        try:
+            # Ensure prices are not None and are numeric
+            prices = prices.dropna()
+            if len(prices) < period:
+                return 0.5, 0
+            
+            sma = prices.rolling(period).mean().iloc[-1]
+            std = prices.rolling(period).std().iloc[-1]
+            current_price = prices.iloc[-1]
+            
+            # Check for None values
+            if any(x is None or pd.isna(x) for x in [sma, std, current_price]):
+                return 0.5, 0
+            
+            sma = float(sma)
+            std = float(std)
+            current_price = float(current_price)
+            
+            if std == 0:
+                return 0.5, 0
+            
+            upper_band = sma + (std * std_mult)
+            lower_band = sma - (std * std_mult)
+            
+            # Calculate position within bands
+            band_range = upper_band - lower_band
+            if band_range == 0:
+                return 0.5, 0
+                
+            bb_position = (current_price - lower_band) / band_range
+            bb_position = np.clip(bb_position, 0, 1)
+            
+            band_width = band_range / sma
+            
+            return float(bb_position), float(band_width)
+        except Exception as e:
+            print(f"❌ BB calculation error: {e}")
             return 0.5, 0
-        
-        upper_band = sma + (std * std_mult)
-        lower_band = sma - (std * std_mult)
-        
-        # Calculate position within bands
-        bb_position = (current_price - lower_band) / (upper_band - lower_band)
-        bb_position = np.clip(bb_position, 0, 1)
-        
-        band_width = (upper_band - lower_band) / sma
-        
-        return bb_position, band_width
     
     def calculate_micro_momentum(self, prices: pd.Series) -> float:
         """Calculate micro-momentum for ultra-aggressive signals"""
