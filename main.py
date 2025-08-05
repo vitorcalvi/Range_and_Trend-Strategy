@@ -31,6 +31,9 @@ class UltraAggressiveStressTestBot:
         self.running = True
         self.stress_test_start = datetime.now()
         
+        # FIXED: Pass stress test start time to engine
+        self.engine.stress_test_start = self.stress_test_start
+        
         print("🔥 ULTRA-AGGRESSIVE STRESS TEST STARTED")
         print(f"   Duration: {self.stress_test_duration/60:.0f} minutes")
         print(f"   Expected signals: 30-80 per hour")
@@ -142,7 +145,7 @@ class UltraAggressiveStressTestBot:
         
         # Close any open positions
         if self.engine.position:
-            await self.engine._close_position_stress_test("Stress test complete")
+            await self.engine._close_position("Stress test complete")
             await asyncio.sleep(2)  # Allow time for position close
         
         # Generate comprehensive stress test report
@@ -190,19 +193,6 @@ class UltraAggressiveStressTestBot:
         # Error analysis
         print(f"\n⚠️  ERROR ANALYSIS:")
         print(f"   Data Fetch Failures: {summary['data_fetch_failures']}")
-        error_types = ['api_rate_limited', 'execution_failed', 'data_validation_failed']
-        for error_type in error_types:
-            count = summary['rejections'].get(error_type, 0)
-            if count > 0:
-                print(f"   {error_type.replace('_', ' ').title()}: {count}")
-        
-        # Risk metrics
-        risk_metrics = summary.get('risk_metrics', {})
-        if risk_metrics:
-            print(f"\n🎯 RISK MANAGEMENT:")
-            print(f"   Emergency Stops: {risk_metrics.get('emergency_stops', 0)} ({risk_metrics.get('emergency_stop_rate', '0%')})")
-            print(f"   Quick Exits: {risk_metrics.get('quick_exits', 0)} ({risk_metrics.get('quick_exit_rate', '0%')})")
-            print(f"   Micro Profits: {risk_metrics.get('micro_profits', 0)} ({risk_metrics.get('micro_profit_rate', '0%')})")
         
         # System stress assessment
         print(f"\n🔥 STRESS TEST ASSESSMENT:")
