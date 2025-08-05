@@ -1,565 +1,393 @@
-import os
-import asyncio
 import pandas as pd
 import numpy as np
-import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
-from pybit.unified_trading import HTTP
-from dotenv import load_dotenv
+from typing import Dict, Optional
 
-from strategies.strategy_manager import StrategyManager
-from strategies.range_strategy import RangeStrategy  
-from strategies.trend_strategy import TrendStrategy
-from core.risk_manager import RiskManager
-from _utils.telegram_notifier import TelegramNotifier
-
-load_dotenv()
-
-class TradeEngine:
+class TrendStrategy:
+    """Optimized Trend Strategy - 1.2R Breakeven + 0.5 ATR Trailing"""
+    
     def __init__(self):
-        # Strategy system
-        self.strategy_manager = StrategyManager()
-        self.range_strategy = RangeStrategy()
-        self.trend_strategy = TrendStrategy()
-        self.risk_manager = RiskManager()
-        self.notifier = TelegramNotifier()
+        # Corrected fee model with maker/taker blend
+        self.taker_fee_rate = Decimal('0.00055')    # 0.055% taker
+        self.maker_fee_rate = Decimal('0.0001')     # 0.01% maker
+        self.maker_fill_ratio = Decimal('0.3')      # 30% maker assumption
+        self.blended_fee_rate = (self.maker_fill_ratio * self.maker_fee_rate + 
+                               (1 - self.maker_fill_ratio) * self.taker_fee_rate)
+        self.slippage_rate = Decimal('0.0002')      # 0.02% slippage
+        self.total_cost_rate = self.blended_fee_rate + self.slippage_rate  # ~0.062%
         
-        # Exchange setup
-        self.symbol = os.getenv('TRADING_SYMBOL', 'ADAUSDT')
-        self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
-        
-        prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
-        self.api_key = os.getenv(f'{prefix}BYBIT_API_KEY')
-        self.api_secret = os.getenv(f'{prefix}BYBIT_API_SECRET')
-        
-        self.exchange = None
-        self.position = None
-        self.position_start_time = None
-        self.position_entry_price = None
-        self.position_size_usdt = None
-        
-        # Market data - 3-minute timeframes
-        self.price_data_3m = pd.DataFrame()
-        self.price_data_3m_secondary = pd.DataFrame()  # Secondary 3m for confirmation
-        
-        # State tracking
-        self.trade_id = 0
-        self.active_strategy = None
-        self.market_info = {}
-        self.successful_entries = 0
-        
-        # Performance tracking
-        self.exit_reasons = {
-            'profit_target': 0, 'emergency_stop': 0, 'max_hold_time': 0,
-            'trailing_stop': 0, 'strategy_switch': 0, 'manual_exit': 0,
-            'timeout_no_profit': 0
+        self.config = {
+            "rsi_length": 14,
+            "fast_ema": 21,
+            "slow_ema": 50,
+            "atr_length": 14,
+            
+            # Optimized RSI levels for trend pullbacks
+            "uptrend_rsi_low": 38,     # Pullback in uptrend
+            "uptrend_rsi_high": 62,    # Rejection level in uptrend
+            "downtrend_rsi_low": 38,   # Rejection level in downtrend
+            "downtrend_rsi_high": 62,  # Pullback in downtrend
+            
+            # CORRECTED: 2R setup parameters
+            "risk_reward_ratio": 2.0,      # 2R target
+            "risk_percentage": 0.018,      # 1.8% position risk (1R)
+            "min_confidence": 70,          # Minimum confidence threshold
+            
+            # Trailing stop parameters (NEW)
+            "breakeven_threshold": 1.2,    # 1.2R breakeven move to activate trailing
+            "trailing_atr_multiplier": 0.5, # 0.5 ATR trailing distance
+            "trailing_fallback_pct": 0.005,  # 0.5% fallback if no ATR
+            "max_drawdown_from_peak": 0.2,   # 20% drawdown from peak triggers exit
+            
+            # Dynamic position sizing
+            "fee_target_percentage": 0.025,  # Fees should be 2.5% of expected gross
+            "min_position_usdt": 3000,       # Minimum for fee efficiency
+            "max_position_usdt": 10000,      # Maximum for safety
+            
+            # Timing and momentum
+            "trend_strength_threshold": 0.0008,  # Minimum EMA separation
+            "cooldown_seconds": 180,         # 3 minutes between signals
+            "max_hold_seconds": 2400,        # 40 minutes max hold
+            "momentum_confirmation": True,    # Require momentum confirmation
+            
+            # Backward compatibility
+            "base_profit_usdt": 45,          # Base profit target (legacy)
         }
-        self.rejections = {
-            'invalid_market': 0, 'cooldown_active': 0, 'insufficient_data': 0,
-            'invalid_signal': 0, 'total_signals': 0, 'unprofitable': 0
-        }
+        self.last_signal_time = None
         
-        self._set_symbol_rules()
-        os.makedirs("logs", exist_ok=True)
-        self.log_file = "logs/trades_3m.log"
+        # Calculate corrected break-even rate
+        self._calculate_breakeven_rate()
+        
+    def _calculate_breakeven_rate(self):
+        """Calculate corrected break-even win rate for 2R setup"""
+        # CORRECTED FORMULA: Win_Rate = (Risk + Fee) / (Risk + Reward)
+        risk_pct = float(self.config['risk_percentage'])      # 1.8%
+        reward_pct = risk_pct * self.config['risk_reward_ratio']  # 3.6%
+        fee_pct = float(self.total_cost_rate)  # ~0.062%
+        
+        numerator = risk_pct + fee_pct      # 0.018 + 0.00062 = 0.01862
+        denominator = risk_pct + reward_pct  # 0.018 + 0.036 = 0.054
+        self.breakeven_rate = numerator / denominator  # 0.34481 = 34.48%
+        
+    def calculate_rsi(self, prices: pd.Series) -> float:
+        """Calculate RSI with standard method"""
+        period = self.config['rsi_length']
+        if len(prices) < period + 5:
+            return 50.0
+        
+        delta = prices.diff().fillna(0)
+        gain = delta.where(delta > 0, 0)
+        loss = (-delta.where(delta < 0, 0))
+        
+        alpha = 1.0 / period
+        avg_gain = gain.ewm(alpha=alpha, min_periods=period).mean().iloc[-1]
+        avg_loss = loss.ewm(alpha=alpha, min_periods=period).mean().iloc[-1]
+        
+        if avg_loss == 0:
+            return 95.0
+        
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return np.clip(rsi, 5, 95)
     
-    def _set_symbol_rules(self):
-        """Set symbol-specific trading rules"""
-        symbol_rules = {
-            'ETH': ('0.01', 0.01),
-            'BTC': ('0.001', 0.001),
-            'ADA': ('1', 1.0)
-        }
+    def calculate_emas(self, prices: pd.Series) -> tuple:
+        """Calculate fast and slow EMAs with trend determination"""
+        fast_period = self.config['fast_ema']
+        slow_period = self.config['slow_ema']
         
-        for key, (step, min_qty) in symbol_rules.items():
-            if key in self.symbol:
-                self.qty_step, self.min_qty = step, min_qty
-                return
+        if len(prices) < slow_period:
+            return prices.iloc[-1], prices.iloc[-1], 'NEUTRAL'
+            
+        fast_ema = prices.ewm(span=fast_period, min_periods=fast_period).mean().iloc[-1]
+        slow_ema = prices.ewm(span=slow_period, min_periods=slow_period).mean().iloc[-1]
         
-        self.qty_step, self.min_qty = '1', 1.0
+        if pd.isna(fast_ema) or pd.isna(slow_ema):
+            return fast_ema, slow_ema, 'NEUTRAL'
+        
+        # Enhanced trend detection
+        ema_diff_pct = (fast_ema - slow_ema) / slow_ema
+        
+        if ema_diff_pct > self.config['trend_strength_threshold']:
+            trend = 'UPTREND'
+        elif ema_diff_pct < -self.config['trend_strength_threshold']:
+            trend = 'DOWNTREND'  
+        else:
+            trend = 'NEUTRAL'
+            
+        return fast_ema, slow_ema, trend
     
-    def connect(self):
-        """Connect to exchange"""
-        try:
-            self.exchange = HTTP(demo=self.demo_mode, api_key=self.api_key, api_secret=self.api_secret)
-            return self.exchange.get_server_time().get('retCode') == 0
-        except:
+    def calculate_trend_momentum(self, prices: pd.Series, ema_fast: float) -> float:
+        """Calculate trend momentum using EMA slope"""
+        if len(prices) < 10:
+            return 0
+        
+        ema_series = prices.ewm(span=self.config['fast_ema']).mean()
+        if len(ema_series) < 8:
+            return 0
+        
+        # Calculate 8-period slope for momentum
+        slope = (ema_series.iloc[-1] - ema_series.iloc[-8]) / ema_series.iloc[-8]
+        return slope
+    
+    def calculate_atr(self, data: pd.DataFrame) -> float:
+        """Calculate Average True Range for trailing stops"""
+        if len(data) < self.config['atr_length'] + 1:
+            return 0
+        
+        high = data['high']
+        low = data['low']
+        close = data['close']
+        
+        # Calculate True Range
+        tr1 = high - low
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+        
+        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = true_range.rolling(self.config['atr_length']).mean().iloc[-1]
+        
+        return float(atr) if not pd.isna(atr) else 0
+    
+    def should_activate_trailing_stop(self, unrealized_pnl: float, position_size_usdt: float) -> bool:
+        """Check if position has reached 1.2R breakeven threshold"""
+        if position_size_usdt <= 0:
             return False
-    
-    def format_quantity(self, qty):
-        """Format quantity according to exchange rules"""
-        if qty < self.min_qty:
-            return "0"
-        
-        try:
-            decimals = len(self.qty_step.split('.')[1]) if '.' in self.qty_step else 0
-            qty_step_float = float(self.qty_step)
-            rounded_qty = round(qty / qty_step_float) * qty_step_float
-            return f"{rounded_qty:.{decimals}f}" if decimals > 0 else str(int(rounded_qty))
-        except:
-            return f"{qty:.3f}"
-    
-    async def run_cycle(self):
-        """Run one 3-minute trading cycle"""
-        if not await self._update_market_data_3m():
-            return
-        
-        await self._check_position_status()
-        
-        if self.position and self.position_start_time:
-            await self._check_position_exit()
-        
-        if not self.position:
-            await self._generate_and_execute_signal()
-        
-        self._display_status_3m()
-    
-    async def _update_market_data_3m(self):
-        """Update 3-minute market data"""
-        try:
-            # Primary 3m data for main analysis
-            klines_3m = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="3", limit=100)
-            # Secondary 3m data for confirmation (slightly offset)
-            klines_3m_secondary = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="3", limit=60)
             
-            if klines_3m.get('retCode') != 0 or klines_3m_secondary.get('retCode') != 0:
-                return False
-            
-            self.price_data_3m = self._process_kline_data(klines_3m['result']['list'])
-            self.price_data_3m_secondary = self._process_kline_data(klines_3m_secondary['result']['list'])
-            
-            return (len(self.price_data_3m) > 30 and 
-                   len(self.price_data_3m_secondary) > 20 and
-                   not self.price_data_3m['close'].isna().any() and
-                   not self.price_data_3m_secondary['close'].isna().any())
-        except:
-            return False
+        # Calculate 1.2R threshold
+        risk_amount = position_size_usdt * float(self.config['risk_percentage'])
+        breakeven_threshold = risk_amount * self.config['breakeven_threshold']  # 1.2R
+        
+        # Subtract fees from threshold
+        fee_cost = position_size_usdt * float(self.total_cost_rate)
+        net_threshold = breakeven_threshold - fee_cost
+        
+        return unrealized_pnl >= net_threshold
     
-    def _process_kline_data(self, kline_list):
-        """Process kline data into DataFrame"""
-        if not kline_list:
-            return pd.DataFrame()
-            
-        df = pd.DataFrame(kline_list, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
-        ])
+    def calculate_trailing_stop_price(self, current_price: float, side: str, atr_value: float) -> float:
+        """Calculate trailing stop price using 0.5 ATR"""
+        if atr_value > 0:
+            trail_distance = atr_value * self.config['trailing_atr_multiplier']  # 0.5 ATR
+        else:
+            # Fallback to percentage-based trailing
+            trail_distance = current_price * self.config['trailing_fallback_pct']  # 0.5%
         
-        if df.empty:
-            return df
-        
-        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
-        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].iloc[-1])
-        return df.sort_values('timestamp').set_index('timestamp')
+        if side.lower() == 'buy':
+            return current_price - trail_distance
+        else:
+            return current_price + trail_distance
     
-    async def _generate_and_execute_signal(self):
-        """3-Minute Trading: Generate signals with faster cooldowns"""
-        strategy_type, market_info = self.strategy_manager.select_strategy(
-            self.price_data_3m, self.price_data_3m_secondary
-        )
+    def generate_signal(self, data: pd.DataFrame, market_condition: str) -> Optional[Dict]:
+        """Generate optimized trend signals with trailing stop preparation"""
+        if len(data) < 60 or self._is_cooldown_active():
+            return None
         
-        self.market_info = market_info
+        # Only trade in trending markets
+        if market_condition not in ["TRENDING", "STRONG_TREND"]:
+            return None
         
-        # 3m trading: Shorter cooldowns (5 minutes between trades)
-        if not market_info.get('trade_allowed', False):
-            cooldown_remaining = market_info.get('trade_cooldown_remaining', 0)
-            if cooldown_remaining > 30:  # Only show if > 30 seconds remaining
-                minutes = int(cooldown_remaining / 60)
-                seconds = int(cooldown_remaining % 60)
-                print(f"⏳ Trade cooldown: {minutes}m {seconds}s remaining")
-            return
+        close = data['close']
+        rsi = self.calculate_rsi(close)
+        fast_ema, slow_ema, trend = self.calculate_emas(close)
+        momentum = self.calculate_trend_momentum(close, fast_ema)
+        atr_value = self.calculate_atr(data)
+        price = close.iloc[-1]
         
-        # Handle strategy switching
-        if self.active_strategy and self.active_strategy != strategy_type:
-            await self._on_strategy_switch(self.active_strategy, strategy_type)
+        if pd.isna(rsi) or trend == 'NEUTRAL':
+            return None
         
-        if self.active_strategy != strategy_type:
-            self.risk_manager.set_strategy(strategy_type)
-            self.risk_manager.adapt_to_market_condition(
-                market_info['condition'], 
-                market_info.get('volatility', 'NORMAL')
-            )
+        # Momentum confirmation if required
+        if self.config['momentum_confirmation'] and abs(momentum) < 0.0005:
+            return None
         
-        self.active_strategy = strategy_type
-        signal = self._generate_signal_3m(strategy_type, market_info)
+        signal = None
+        
+        # Enhanced trend following signals
+        if trend == 'UPTREND' and momentum > 0:
+            # Long signal on RSI pullback in uptrend
+            if (self.config['uptrend_rsi_low'] <= rsi <= self.config['uptrend_rsi_high'] or
+                (rsi > 50 and momentum > 0.002)):  # Strong momentum override
+                signal = self._create_trend_signal('BUY', trend, rsi, price, data, 
+                                                 fast_ema, slow_ema, momentum, atr_value, market_condition)
+                
+        elif trend == 'DOWNTREND' and momentum < 0:
+            # Short signal on RSI pullback in downtrend
+            if (self.config['downtrend_rsi_low'] <= rsi <= self.config['downtrend_rsi_high'] or
+                (rsi < 50 and momentum < -0.002)):  # Strong momentum override
+                signal = self._create_trend_signal('SELL', trend, rsi, price, data, 
+                                                 fast_ema, slow_ema, momentum, atr_value, market_condition)
         
         if signal:
-            self.rejections['total_signals'] += 1
-            if self._validate_signal_3m(signal, market_info):
-                await self._execute_trade_3m(signal, strategy_type, market_info)
+            self.last_signal_time = datetime.now()
+        
+        return signal
     
-    def _generate_signal_3m(self, strategy_type, market_info):
-        """Generate signal using 3-minute data"""
-        try:
-            # Both strategies use 3m data for fast execution
-            if strategy_type == "RANGE":
-                return self.range_strategy.generate_signal(self.price_data_3m, market_info['condition'])
-            else:  # TREND
-                return self.trend_strategy.generate_signal(self.price_data_3m, market_info['condition'])
-        except:
-            self.rejections['invalid_signal'] += 1
+    def _create_trend_signal(self, action: str, trend: str, rsi: float, price: float, 
+                           data: pd.DataFrame, fast_ema: float, slow_ema: float, 
+                           momentum: float, atr_value: float, market_condition: str) -> Dict:
+        """Create optimized trend signal with trailing stop setup"""
+        
+        # Use medium window for structure identification
+        window = data.tail(40)
+        
+        if action == 'BUY':
+            # Use EMA and recent structure for stop
+            ema_stop = fast_ema * 0.994  # 0.6% below fast EMA
+            swing_low = window['low'].min()
+            structure_stop = max(swing_low * 0.997, ema_stop)  # Choose closer stop
+            level = swing_low
+        else:
+            # Use EMA and recent structure for stop
+            ema_stop = fast_ema * 1.006  # 0.6% above fast EMA
+            swing_high = window['high'].max()
+            structure_stop = min(swing_high * 1.003, ema_stop)  # Choose closer stop
+            level = swing_high
+        
+        # Validate stop distance for 2R setup
+        risk_distance = abs(price - structure_stop) / price
+        if not (0.010 <= risk_distance <= 0.040):  # 1% to 4% risk range
             return None
-    
-    def _validate_signal_3m(self, signal, market_info):
-        """Enhanced signal validation for 3m trading"""
-        validation_checks = [
-            (not signal or market_info['condition'] == 'INSUFFICIENT_DATA', 'insufficient_data'),
-            (market_info['confidence'] < 0.65, 'invalid_market'),  # Higher confidence for 3m
-            (signal.get('confidence', 0) < 65, 'invalid_signal')   # Higher confidence threshold
-        ]
         
-        for condition, rejection_type in validation_checks:
-            if condition:
-                self.rejections[rejection_type] += 1
-                return False
+        # Calculate 2R target
+        reward_distance = risk_distance * self.config['risk_reward_ratio']
         
-        return True
-    
-    async def _execute_trade_3m(self, signal, strategy_type, market_info):
-        """Execute 3-minute trade with $3,817 position sizing"""
-        current_price = float(self.price_data_3m['close'].iloc[-1])
-        balance = await self.get_account_balance()
-        
-        if not balance or not self._validate_signal_3m(signal, market_info):
-            return
-        
-        # 3m trading: $3,817 position size
-        base_qty = self.risk_manager.calculate_position_size(
-            balance, current_price, signal['structure_stop']
-        )
-        
-        # More conservative sizing multiplier for 3m
-        sizing_multiplier = self.strategy_manager.get_position_sizing_multiplier(
-            strategy_type, market_info
-        )
-        qty = base_qty * sizing_multiplier
-        
-        formatted_qty = self.format_quantity(qty)
-        
-        if formatted_qty == "0" or float(formatted_qty) < 0.001:
-            print(f"❌ Position too small: {formatted_qty}")
-            return
-        
-        # Calculate actual position size
-        position_size_usdt = float(formatted_qty) * current_price
-        
-        # Validate position size for 3m trading (cap at $4,000)
-        if position_size_usdt > 4000:
-            print(f"❌ Position too large: ${position_size_usdt:.2f}, capping at $4,000")
-            qty = 4000 / current_price
-            formatted_qty = self.format_quantity(qty)
-            position_size_usdt = float(formatted_qty) * current_price
-        
-        break_even_fees = self.risk_manager.get_break_even_pnl(position_size_usdt)
-        
-        try:
-            order = self.exchange.place_order(
-                category="linear", 
-                symbol=self.symbol,
-                side="Buy" if signal['action'] == 'BUY' else "Sell",
-                orderType="Market", 
-                qty=formatted_qty, 
-                timeInForce="IOC"
-            )
-            
-            if order.get('retCode') == 0:
-                # Record trade time for 3m cooldown (5 minutes)
-                self.strategy_manager.record_trade()
-                
-                self.successful_entries += 1
-                self.position_entry_price = current_price
-                self.position_size_usdt = position_size_usdt
-                
-                self._log_trade_3m("ENTRY", current_price, signal=signal, quantity=formatted_qty, 
-                                  strategy=strategy_type, position_size_usdt=position_size_usdt,
-                                  break_even_fees=break_even_fees)
-                               
-                await self.notifier.send_trade_entry(signal, current_price, formatted_qty, 
-                                                   self._get_strategy_info())
-                
-                print(f"✅ 3M Trade: {signal['action']} {formatted_qty} @ ${current_price:.2f}")
-                print(f"   Position: ${position_size_usdt:.2f} | Break-even: ${break_even_fees:.2f}")
-                
-        except Exception as e:
-            print(f"❌ Trade execution error: {e}")
-    
-    async def _check_position_status(self):
-        """Check position status"""
-        try:
-            positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
-            if positions.get('retCode') != 0:
-                return
-            
-            pos_list = positions['result']['list']
-            
-            if not pos_list or float(pos_list[0]['size']) == 0:
-                if self.position:
-                    await self._on_position_closed()
-                self._reset_position()
-                return
-            
-            if not self.position:
-                self.position_start_time = datetime.now()
-                if not self.position_entry_price:
-                    self.position_entry_price = float(pos_list[0].get('avgPrice', 0))
-                if not self.position_size_usdt and self.position_entry_price:
-                    qty = float(pos_list[0]['size'])
-                    self.position_size_usdt = qty * self.position_entry_price
-                    
-            self.position = pos_list[0]
-        except:
-            pass
-    
-    async def _check_position_exit(self):
-        """3-Minute Trading: Fast exit checking"""
-        if not self.position or not self.position_start_time:
-            return
-        
-        current_price = float(self.price_data_3m['close'].iloc[-1])
-        entry_price = self.position_entry_price or float(self.position.get('avgPrice', 0))
-        side = self.position.get('side', '')
-        
-        # Use Bybit's unrealized PnL
-        unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
-        position_age = (datetime.now() - self.position_start_time).total_seconds()
-        
-        # Get position size for fee calculations
-        position_size_usdt = self.position_size_usdt or (
-            float(self.position.get('size', 0)) * entry_price
-        )
-        
-        if self.risk_manager.active_strategy != self.active_strategy:
-            self.risk_manager.set_strategy(self.active_strategy)
-        
-        # Fast 3m exit decision
-        should_close, reason = self.risk_manager.should_close_position(
-            current_price, entry_price, side, unrealized_pnl, position_age, position_size_usdt
-        )
-        
-        if should_close:
-            await self._close_position(reason)
-    
-    async def _close_position(self, reason="Manual"):
-        """Close 3m position and log"""
-        if not self.position:
-            return
-        
-        current_price = float(self.price_data_3m['close'].iloc[-1]) if len(self.price_data_3m) > 0 else 0
-        unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
-        
-        side = "Sell" if self.position.get('side') == "Buy" else "Buy"
-        qty = self.format_quantity(float(self.position['size']))
-        
-        try:
-            order = self.exchange.place_order(
-                category="linear", symbol=self.symbol, side=side,
-                orderType="Market", qty=qty, timeInForce="IOC", reduceOnly=True
-            )
-            
-            if order.get('retCode') == 0:
-                duration = (datetime.now() - self.position_start_time).total_seconds() if self.position_start_time else 0
-                
-                self._track_exit_reason(reason)
-                
-                self._log_trade_3m("EXIT", current_price, reason=reason, bybit_unrealized_pnl=unrealized_pnl, 
-                                  strategy=self.active_strategy, duration=duration, 
-                                  position_size_usdt=self.position_size_usdt or 0)
-                
-                exit_data = {'trigger': reason, 'strategy': self.active_strategy}
-                await self.notifier.send_trade_exit(exit_data, current_price, unrealized_pnl, duration, self._get_strategy_info())
-        except Exception as e:
-            print(f"❌ Position close error: {e}")
-    
-    async def _on_strategy_switch(self, old_strategy, new_strategy):
-        """Handle strategy switch"""
-        if self.position:
-            await self._close_position("strategy_switch")
-            
-            for _ in range(5):
-                await asyncio.sleep(1)
-                await self._check_position_status()
-                if not self.position:
-                    break
-                    
-            if self.position:
-                self._reset_position()
-        
-        self.exit_reasons['strategy_switch'] += 1
-    
-    async def _on_position_closed(self):
-        """Handle position closed externally"""
-        if self.position:
-            unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
-            price = float(self.price_data_3m['close'].iloc[-1]) if len(self.price_data_3m) > 0 else 0
-            self._track_exit_reason('position_closed')
-            self._log_trade_3m("EXIT", price, reason="position_closed", bybit_unrealized_pnl=unrealized_pnl, 
-                              strategy=self.active_strategy, position_size_usdt=self.position_size_usdt or 0)
-    
-    def _reset_position(self):
-        """Reset position state"""
-        self.position = None
-        self.position_start_time = None
-        self.position_entry_price = None
-        self.position_size_usdt = None
-    
-    def _track_exit_reason(self, reason):
-        """Track exit reason"""
-        if reason in self.exit_reasons:
-            self.exit_reasons[reason] += 1
+        if action == 'BUY':
+            target_price = price + (price * reward_distance)
         else:
-            self.exit_reasons['manual_exit'] += 1
-    
-    def _log_trade_3m(self, action, price, **kwargs):
-        """3-Minute trading log with proper fees"""
-        timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+            target_price = price - (price * reward_distance)
         
-        if action == "ENTRY":
-            self.trade_id += 1
-            signal = kwargs.get('signal', {})
-            position_size_usdt = kwargs.get('position_size_usdt', 0)
-            break_even_fees = kwargs.get('break_even_fees', 0)
-            
-            log_data = {
-                'timestamp': timestamp, 'id': self.trade_id, 'action': 'ENTRY',
-                'strategy': kwargs.get('strategy', 'UNKNOWN'), 'timeframe': '3m',
-                'side': signal.get('action', ''), 'price': round(price, 2), 
-                'size': kwargs.get('quantity', ''), 
-                'market_condition': self.market_info.get('condition', ''),
-                'adx': round(self.market_info.get('adx', 0), 1),
-                'confidence': round(signal.get('confidence', 0), 1),
-                'position_size_usdt': round(position_size_usdt, 2),
-                'break_even_fees': round(break_even_fees, 2),
-                'note': f'3m trading: Need ${break_even_fees:.2f} profit to cover 0.11% fees'
-            }
+        # Fee efficiency validation
+        estimated_position = 6000  # Larger position for trends
+        fee_cost = estimated_position * float(self.total_cost_rate)
+        gross_profit_target = estimated_position * reward_distance
+        fee_efficiency_ratio = gross_profit_target / fee_cost if fee_cost > 0 else 0
+        
+        if fee_efficiency_ratio < 20:  # Require 20x fee efficiency for trends
+            return None
+        
+        # Calculate 1.2R breakeven threshold for trailing activation
+        breakeven_1_2r = estimated_position * float(self.config['risk_percentage']) * self.config['breakeven_threshold']
+        breakeven_net = breakeven_1_2r - fee_cost
+        
+        # Calculate trailing stop price (for reference)
+        trailing_stop_price = self.calculate_trailing_stop_price(price, action, atr_value)
+        
+        # Optimized confidence calculation
+        base_confidence = 70
+        
+        # Trend strength bonus
+        trend_strength = abs(fast_ema - slow_ema) / slow_ema * 100
+        trend_bonus = min(trend_strength * 1.5, 12)
+        
+        # Momentum bonus
+        momentum_strength = abs(momentum) * 1000
+        momentum_bonus = min(momentum_strength * 0.8, 10)
+        
+        # RSI positioning bonus (pullback quality)
+        if action == 'BUY':
+            rsi_bonus = max(0, (50 - rsi) * 0.2) if rsi < 50 else 0
         else:
-            duration = kwargs.get('duration', 0)
-            bybit_pnl = kwargs.get('bybit_unrealized_pnl', 0)
-            position_size_usdt = kwargs.get('position_size_usdt', 0)
-            
-            if position_size_usdt > 0:
-                break_even_fees = self.risk_manager.get_break_even_pnl(position_size_usdt)
-                estimated_net = bybit_pnl - break_even_fees
-            else:
-                estimated_net = bybit_pnl
-                break_even_fees = 0
-            
-            log_data = {
-                'timestamp': timestamp, 'id': self.trade_id, 'action': 'EXIT',
-                'strategy': kwargs.get('strategy', 'UNKNOWN'), 'timeframe': '3m',
-                'trigger': kwargs.get('reason', '').lower().replace(' ', '_'),
-                'price': round(price, 2), 
-                'bybit_unrealized_pnl': round(bybit_pnl, 2),
-                'estimated_fees': round(break_even_fees, 2),
-                'estimated_net_profit': round(estimated_net, 2),
-                'hold_seconds': round(duration, 1),
-                'note': '3m trading: Estimated net = unrealized_pnl - fees (0.11%)'
-            }
+            rsi_bonus = max(0, (rsi - 50) * 0.2) if rsi > 50 else 0
         
-        try:
-            with open(self.log_file, "a") as f:
-                f.write(json.dumps(log_data) + "\n")
-        except Exception as e:
-            print(f"❌ Logging error: {e}")
+        # Market condition bonus
+        condition_bonus = 8 if market_condition == "STRONG_TREND" else 5
+        
+        confidence = base_confidence + trend_bonus + momentum_bonus + rsi_bonus + condition_bonus
+        confidence = np.clip(confidence, 70, 95)
+        
+        return {
+            'action': action,
+            'strategy': 'TREND',
+            'setup_type': 'Optimized 2R with 1.2R Trailing',
+            'trend': trend,
+            'market_condition': market_condition,
+            'rsi': round(rsi, 1),
+            'fast_ema': round(fast_ema, 4),
+            'slow_ema': round(slow_ema, 4),
+            'momentum': round(momentum * 100, 2),
+            'atr': round(atr_value, 4),
+            'price': price,
+            'structure_stop': structure_stop,
+            'target_price': target_price,
+            'level': level,
+            'risk_reward_ratio': self.config['risk_reward_ratio'],
+            'risk_percentage': round(risk_distance * 100, 2),
+            'reward_percentage': round(reward_distance * 100, 2),
+            'signal_type': f"trend_{action.lower()}",
+            'confidence': round(confidence, 1),
+            'max_hold_seconds': self.config['max_hold_seconds'],
+            'timeframe': '15m',
+            'trailing_stop_config': {
+                'breakeven_threshold': f"{self.config['breakeven_threshold']}R",
+                'breakeven_dollar_threshold': f"${breakeven_net:.2f}",
+                'atr_multiplier': self.config['trailing_atr_multiplier'],
+                'current_atr': round(atr_value, 4),
+                'trailing_distance': f"${atr_value * self.config['trailing_atr_multiplier']:.2f}" if atr_value > 0 else f"{self.config['trailing_fallback_pct']*100:.1f}%",
+                'example_trailing_stop': round(trailing_stop_price, 2),
+                'max_drawdown_trigger': f"{self.config['max_drawdown_from_peak']*100:.0f}% from peak"
+            },
+            'fee_efficiency': {
+                'estimated_fees': f"${fee_cost:.2f}",
+                'gross_target': f"${gross_profit_target:.2f}",
+                'efficiency_ratio': f"{fee_efficiency_ratio:.1f}x",
+                'fee_percentage': f"{(fee_cost/gross_profit_target)*100:.1f}%"
+            },
+            'corrected_breakeven': {
+                'theoretical_win_rate': f"{self.breakeven_rate*100:.2f}%",
+                'formula': 'Win_Rate = (Risk + Fee) / (Risk + Reward)',
+                'calculation': f"({risk_distance*100:.2f}% + {float(self.total_cost_rate)*100:.3f}%) / ({risk_distance*100:.2f}% + {reward_distance*100:.2f}%)",
+                'improvement': 'Much better than range strategy 41.24% requirement'
+            }
+        }
     
-    async def get_account_balance(self):
-        """Get account balance"""
-        try:
-            balance = self.exchange.get_wallet_balance(accountType="UNIFIED")
-            if balance.get('retCode') == 0:
-                coins = balance['result']['list'][0]['coin']
-                usdt = next((c for c in coins if c['coin'] == 'USDT'), None)
-                return float(usdt['walletBalance']) if usdt else 0
-            return 0
-        except:
-            return 0
+    def _is_cooldown_active(self) -> bool:
+        """Check if cooldown is active"""
+        if not self.last_signal_time:
+            return False
+        return (datetime.now() - self.last_signal_time).total_seconds() < self.config['cooldown_seconds']
     
-    def _get_strategy_info(self):
-        """Get current strategy information"""
-        return (self.range_strategy.get_strategy_info() if self.active_strategy == "RANGE" 
-                else self.trend_strategy.get_strategy_info())
-    
-    def _display_status_3m(self):
-        """3-Minute Trading Display"""
-        try:
-            price = float(self.price_data_3m['close'].iloc[-1])
-            time = self.price_data_3m.index[-1].strftime('%H:%M:%S')
-            symbol_display = self.symbol.replace('USDT', '/USDT')
-            price_formatted = f"{price:,.2f}".replace(',', ' ')
-            
-            print("\n" * 50)
-            
-            w = 77
-            print(f"{'='*w}\n⚡  {symbol_display} 3-MINUTE TRADING BOT v3.0\n{'='*w}\n")
-            
-            market_condition = self.market_info.get('condition', 'UNKNOWN')
-            adx = self.market_info.get('adx', 0)
-            confidence = self.market_info.get('confidence', 0)
-            
-            print("🧠  3-MINUTE MARKET ANALYSIS\n" + "─"*w)
-            print(f"📊 Market Condition: {market_condition:<12} │ 📈 ADX: {adx:>5.1f} │ 🎯 Confidence: {confidence*100:>3.0f}%")
-            print(f"⚙️  Active Strategy: {self.active_strategy or 'NONE':<13} │ 🕐 Timeframe: 3m")
-            
-            # Show cooldown status
-            trade_cooldown = self.market_info.get('trade_cooldown_remaining', 0)
-            if trade_cooldown > 0:
-                minutes = int(trade_cooldown / 60)
-                seconds = int(trade_cooldown % 60)
-                print(f"⏳ Trade Cooldown: {minutes}m {seconds}s remaining")
-            else:
-                print("✅ Ready for 3m trades")
-                
-            print("─"*w + "\n")
-            
-            print("📋  3-MINUTE STRATEGY STATUS\n" + "─"*w)
-            if self.active_strategy == "RANGE":
-                print(f"🎯 3m Range Strategy: RSI+BB (Fast Scalping)")
-                print(f"📊 Position Size: $3,817 │ Target: $92 (2.4%)")
-            else:
-                print(f"📈 3m Trend Strategy: EMA+RSI (Quick Momentum)")
-                print(f"📊 Position Size: $3,817 │ RR: 1:2.5")
-                
-            print(f"⏰ Max Hold: 45 minutes │ Emergency Stop: 1.2%")
-            print("─"*w + "\n")
-            
-            print("📊  3-MINUTE PERFORMANCE\n" + "─"*w)
-            total_trades = sum(self.exit_reasons.values())
-            total_signals = self.rejections.get('total_signals', 0)
-            print(f"🔢 Total Trades: {total_trades:>3} │ 📈 Signals: {total_signals:>3} │ ✅ Accept Rate: {(total_trades/max(total_signals,1)*100):>4.1f}%")
-            print(f"📝 Log: logs/trades_3m.log")
-            
-            print("─"*w + "\n")
-            print(f"⏰ {time}   |   💰 ${price_formatted}")
-            print()
-            
-            # Position info
-            if self.position:
-                unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
-                entry = self.position_entry_price or float(self.position.get('avgPrice', 0))
-                size = self.position.get('size', '0')
-                side = self.position.get('side', '')
-                
-                age = (datetime.now() - self.position_start_time).total_seconds() if self.position_start_time else 0
-                
-                position_size_usdt = self.position_size_usdt or (float(size) * entry)
-                break_even_fees = self.risk_manager.get_break_even_pnl(position_size_usdt)
-                net_pnl = unrealized_pnl - break_even_fees
-                
-                emoji = "🟢" if side == "Buy" else "🔴"
-                print(f"{emoji} 3m {side}: {size} @ ${entry:.2f} │ Strategy: {self.active_strategy}")
-                print(f"   Gross PnL: ${unrealized_pnl:.2f} │ Fees: ${break_even_fees:.2f} │ Net: ${net_pnl:.2f}")
-                print(f"   Age: {age:.1f}s │ Max: 2700s (45min)")
-            else:
-                print("⚡  No Position — 3-Minute Scanner Active (5min cooldowns)")
-            
-            print("─" * 60)
-            
-        except Exception as e:
-            print(f"❌ Display error: {e}")
-    
-    def _get_active_timeframe(self):
-        """Get active timeframe string"""
-        return "3m"
+    def get_strategy_info(self) -> Dict:
+        """Get comprehensive strategy information"""
+        return {
+            'name': 'Optimized Trend Strategy',
+            'type': 'TREND',
+            'setup': '2R with 1.2R Breakeven + 0.5 ATR Trailing',
+            'timeframe': '15m', 
+            'config': self.config,
+            'corrected_breakeven': {
+                'win_rate_required': f"{self.breakeven_rate*100:.2f}%",
+                'formula': 'Win_Rate = (Risk + Fee) / (Risk + Reward)',
+                'advantage': f"{(41.24 - self.breakeven_rate*100):.2f}% easier than range strategy"
+            },
+            'trailing_stop_system': {
+                'activation': '1.2R breakeven move',
+                'method': '0.5 ATR or 0.5% fallback',
+                'drawdown_trigger': '20% from peak profit',
+                'purpose': 'Capture outsized trend moves beyond 2R'
+            },
+            'fee_model': {
+                'maker_fee': f"{float(self.maker_fee_rate)*100:.3f}%",
+                'taker_fee': f"{float(self.taker_fee_rate)*100:.3f}%",
+                'blended_fee': f"{float(self.blended_fee_rate)*100:.3f}%",
+                'total_cost': f"{float(self.total_cost_rate)*100:.3f}%"
+            },
+            'dynamic_sizing': {
+                'fee_target': f"{self.config['fee_target_percentage']*100:.1f}% of gross profit",
+                'position_range': f"${self.config['min_position_usdt']} - ${self.config['max_position_usdt']}",
+                'efficiency_requirement': '20x profit-to-fee ratio minimum'
+            },
+            'optimizations': {
+                'ema_dynamic_stops': 'EMA-based stop placement',
+                'momentum_confirmation': 'Requires directional momentum',
+                'rsi_pullback_entry': 'Enter on pullbacks in trend direction',
+                'atr_trailing_stops': 'ATR-based trailing for outsized moves',
+                'limit_first_execution': 'Attempts maker fills before taker'
+            },
+            'expected_performance': {
+                'theoretical_win_rate': f"{self.breakeven_rate*100:.2f}%",
+                'target_win_rate': '38-42%',
+                'risk_reward': f'1:{self.config["risk_reward_ratio"]} base + trailing upside',
+                'hold_time': f'Up to {self.config["max_hold_seconds"]/60:.0f} minutes'
+            },
+            'description': f'Fee-optimized trend following: RSI({self.config["rsi_length"]}) + EMA({self.config["fast_ema"]}/{self.config["slow_ema"]}) with 2R targets, 1.2R trailing activation, and {self.breakeven_rate*100:.2f}% break-even requirement'
+        }
