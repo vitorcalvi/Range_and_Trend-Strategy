@@ -3,9 +3,8 @@ import asyncio
 import pandas as pd
 import numpy as np
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Dict
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
 
@@ -18,8 +17,10 @@ from _utils.telegram_notifier import TelegramNotifier
 load_dotenv()
 
 class TradeEngine:
+    """ULTRA-AGGRESSIVE: High-frequency trading engine with 3m optimization"""
+    
     def __init__(self):
-        # Strategy system
+        # Strategy system (ultra-aggressive)
         self.strategy_manager = StrategyManager()
         self.range_strategy = RangeStrategy()
         self.trend_strategy = TrendStrategy()
@@ -27,7 +28,7 @@ class TradeEngine:
         self.notifier = TelegramNotifier()
         
         # Exchange setup
-        self.symbol = os.getenv('TRADING_SYMBOL', 'ADAUSDT')
+        self.symbol = os.getenv('TRADING_SYMBOL', 'ETHUSDT')
         self.demo_mode = os.getenv('DEMO_MODE', 'true').lower() == 'true'
         
         prefix = 'TESTNET_' if self.demo_mode else 'LIVE_'
@@ -39,35 +40,38 @@ class TradeEngine:
         self.position_start_time = None
         self.position_entry_price = None
         self.position_size_usdt = None
-        self.highest_profit = 0  # Track highest profit for trailing stops
+        self.highest_profit = 0.0  # For trailing stops
         
-        # Market data
+        # ULTRA-AGGRESSIVE market data (3m optimized)
         self.price_data_1m = pd.DataFrame()
         self.price_data_15m = pd.DataFrame()
-        self.current_atr = 0  # For ATR-based trailing stops
+        self.price_data_3m = pd.DataFrame()  # Simulated 3m data
+        self.atr_period = 14
+        self.current_atr = 0.0
         
         # State tracking
         self.trade_id = 0
         self.active_strategy = None
         self.market_info = {}
         self.successful_entries = 0
+        self.last_cycle_time = datetime.now()
         
-        # Performance tracking
+        # ULTRA-AGGRESSIVE performance tracking
         self.exit_reasons = {
             'profit_target': 0, 'emergency_stop': 0, 'max_hold_time': 0,
             'trailing_stop': 0, 'strategy_switch': 0, 'manual_exit': 0,
-            'timeout_no_profit': 0, 'stop_loss': 0, 'profit_lock': 0
+            'timeout_no_profit': 0
         }
         self.rejections = {
             'invalid_market': 0, 'cooldown_active': 0, 'insufficient_data': 0,
             'invalid_signal': 0, 'total_signals': 0, 'unprofitable': 0,
-            'fee_inefficient': 0
+            'fee_efficiency': 0, 'position_too_small': 0
         }
         
         # Order execution tracking
         self.order_stats = {
-            'limit_fills': 0, 'market_fills': 0, 'partial_fills': 0,
-            'total_maker_savings': 0.0
+            'maker_fills': 0, 'taker_fills': 0, 'limit_attempts': 0,
+            'limit_successes': 0, 'total_orders': 0
         }
         
         self._set_symbol_rules()
@@ -110,33 +114,12 @@ class TradeEngine:
         except:
             return f"{qty:.3f}"
     
-    def calculate_atr(self, data: pd.DataFrame, period: int = 14) -> float:
-        """Calculate Average True Range for trailing stops"""
-        if len(data) < period + 1:
-            return 0
-        
-        high = data['high']
-        low = data['low'] 
-        close = data['close']
-        
-        # Calculate True Range
-        tr1 = high - low
-        tr2 = (high - close.shift(1)).abs()
-        tr3 = (low - close.shift(1)).abs()
-        
-        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = true_range.rolling(period).mean().iloc[-1]
-        
-        return float(atr) if not pd.isna(atr) else 0
-    
     async def run_cycle(self):
-        """Run one trading cycle"""
+        """ULTRA-AGGRESSIVE: High-frequency trading cycle (every 0.3 seconds)"""
+        cycle_start = datetime.now()
+        
         if not await self._update_market_data():
             return
-        
-        # Update ATR for trailing stops
-        if len(self.price_data_15m) > 15:
-            self.current_atr = self.calculate_atr(self.price_data_15m)
         
         await self._check_position_status()
         
@@ -146,12 +129,21 @@ class TradeEngine:
         if not self.position:
             await self._generate_and_execute_signal()
         
-        self._display_status()
+        # Ultra-aggressive cycle timing (faster than before)
+        cycle_time = (datetime.now() - cycle_start).total_seconds()
+        if cycle_time < 0.5:  # Target 2 cycles per second
+            await asyncio.sleep(0.5 - cycle_time)
+        
+        # Update display every 3 seconds to avoid spam
+        if (datetime.now() - self.last_cycle_time).total_seconds() >= 3:
+            self._display_status()
+            self.last_cycle_time = datetime.now()
     
     async def _update_market_data(self):
-        """Update both 1m and 15m market data"""
+        """ULTRA-AGGRESSIVE: Update market data with 3m simulation"""
         try:
-            klines_1m = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="1", limit=200)
+            # Get more 1m data for 3m simulation
+            klines_1m = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="1", limit=300)
             klines_15m = self.exchange.get_kline(category="linear", symbol=self.symbol, interval="15", limit=100)
             
             if klines_1m.get('retCode') != 0 or klines_15m.get('retCode') != 0:
@@ -160,12 +152,76 @@ class TradeEngine:
             self.price_data_1m = self._process_kline_data(klines_1m['result']['list'])
             self.price_data_15m = self._process_kline_data(klines_15m['result']['list'])
             
-            return (len(self.price_data_1m) > 50 and 
+            # Simulate 3m data from 1m data
+            self.price_data_3m = self._create_3m_data_from_1m(self.price_data_1m)
+            
+            # Calculate ATR for trailing stops
+            self._calculate_atr()
+            
+            return (len(self.price_data_1m) > 60 and 
                    len(self.price_data_15m) > 30 and
+                   len(self.price_data_3m) > 20 and
                    not self.price_data_1m['close'].isna().any() and
                    not self.price_data_15m['close'].isna().any())
-        except:
+        except Exception as e:
+            print(f"❌ Market data error: {e}")
             return False
+    
+    def _create_3m_data_from_1m(self, data_1m: pd.DataFrame) -> pd.DataFrame:
+        """Create 3-minute OHLCV data from 1-minute data"""
+        if len(data_1m) < 3:
+            return pd.DataFrame()
+        
+        # Group by 3-minute intervals
+        data_1m_copy = data_1m.copy()
+        data_1m_copy.reset_index(inplace=True)
+        
+        # Create 3m groups (every 3 rows)
+        group_size = 3
+        groups = []
+        
+        for i in range(0, len(data_1m_copy) - group_size + 1, group_size):
+            group = data_1m_copy.iloc[i:i+group_size]
+            
+            ohlcv_3m = {
+                'timestamp': group['timestamp'].iloc[-1],  # Last timestamp
+                'open': group['open'].iloc[0],             # First open
+                'high': group['high'].max(),               # Highest high
+                'low': group['low'].min(),                 # Lowest low  
+                'close': group['close'].iloc[-1],          # Last close
+                'volume': group['volume'].sum()            # Sum volume
+            }
+            groups.append(ohlcv_3m)
+        
+        if not groups:
+            return pd.DataFrame()
+        
+        df_3m = pd.DataFrame(groups)
+        return df_3m.set_index('timestamp')
+    
+    def _calculate_atr(self):
+        """Calculate ATR for ultra-tight trailing stops"""
+        if len(self.price_data_3m) < self.atr_period:
+            self.current_atr = 0.0
+            return
+        
+        data = self.price_data_3m.tail(self.atr_period + 1)
+        
+        # True Range calculation
+        tr_values = []
+        for i in range(1, len(data)):
+            high = data['high'].iloc[i]
+            low = data['low'].iloc[i]
+            prev_close = data['close'].iloc[i-1]
+            
+            tr = max(
+                high - low,
+                abs(high - prev_close),
+                abs(low - prev_close)
+            )
+            tr_values.append(tr)
+        
+        self.current_atr = np.mean(tr_values) if tr_values else 0.0
     
     def _process_kline_data(self, kline_list):
         """Process kline data into DataFrame"""
@@ -188,20 +244,19 @@ class TradeEngine:
         return df.sort_values('timestamp').set_index('timestamp')
     
     async def _generate_and_execute_signal(self):
-        """Generate signals with dynamic position sizing"""
+        """ULTRA-AGGRESSIVE: Generate signals with enhanced frequency tracking"""
+        # Use 3m data for strategy selection (ultra-aggressive)
         strategy_type, market_info = self.strategy_manager.select_strategy(
-            self.price_data_1m, self.price_data_15m
+            self.price_data_3m, self.price_data_15m
         )
         
         self.market_info = market_info
         
-        # Check trade cooldown
+        # Check trade cooldown (2 minutes)
         if not market_info.get('trade_allowed', False):
             cooldown_remaining = market_info.get('trade_cooldown_remaining', 0)
-            if cooldown_remaining > 60:
-                minutes = int(cooldown_remaining / 60)
-                print(f"⏳ Trade cooldown: {minutes}m remaining")
-            return
+            if cooldown_remaining > 30:  # Only show if > 30 seconds remaining
+                return
         
         # Handle strategy switching
         if self.active_strategy and self.active_strategy != strategy_type:
@@ -220,25 +275,28 @@ class TradeEngine:
         if signal:
             self.rejections['total_signals'] += 1
             if self._validate_signal(signal, market_info):
-                await self._execute_trade_with_limit_first(signal, strategy_type, market_info)
+                await self._execute_trade(signal, strategy_type, market_info)
     
     def _generate_signal(self, strategy_type, market_info):
-        """Generate signal using the appropriate strategy"""
+        """Generate signal using ultra-aggressive strategies"""
         try:
             if strategy_type == "RANGE":
-                return self.range_strategy.generate_signal(self.price_data_1m, market_info['condition'])
+                # Use 3m data for range strategy
+                return self.range_strategy.generate_signal(self.price_data_3m, market_info['condition'])
             else:  # TREND
-                return self.trend_strategy.generate_signal(self.price_data_15m, market_info['condition'])
-        except:
+                # Use 3m data for trend strategy  
+                return self.trend_strategy.generate_signal(self.price_data_3m, market_info['condition'])
+        except Exception as e:
+            print(f"❌ Signal generation error: {e}")
             self.rejections['invalid_signal'] += 1
             return None
     
     def _validate_signal(self, signal, market_info):
-        """Enhanced signal validation with fee efficiency check"""
+        """ULTRA-AGGRESSIVE: Enhanced signal validation with fee efficiency"""
         validation_checks = [
             (not signal or market_info['condition'] == 'INSUFFICIENT_DATA', 'insufficient_data'),
             (market_info['confidence'] < 0.6, 'invalid_market'),
-            (signal.get('confidence', 0) < 70, 'invalid_signal')  # Higher threshold
+            (signal.get('confidence', 0) < 62, 'invalid_signal')  # REDUCED threshold
         ]
         
         for condition, rejection_type in validation_checks:
@@ -248,21 +306,20 @@ class TradeEngine:
         
         return True
     
-    async def _execute_trade_with_limit_first(self, signal, strategy_type, market_info):
-        """LIMIT-FIRST execution: Try limit order first, fallback to market"""
-        current_price = float(self.price_data_1m['close'].iloc[-1])
+    async def _execute_trade(self, signal, strategy_type, market_info):
+        """ULTRA-AGGRESSIVE: Execute trade with limit-first order strategy"""
+        current_price = float(self.price_data_3m['close'].iloc[-1])
         balance = await self.get_account_balance()
         
-        if not balance or not self._validate_signal(signal, market_info):
+        if not balance or balance < 1000:  # Minimum balance check
             return
         
-        # Dynamic position sizing
-        expected_hold_minutes = 10 if strategy_type == "RANGE" else 30
-        base_qty = self.risk_manager.calculate_dynamic_position_size(
-            balance, current_price, signal['structure_stop'], expected_hold_minutes
+        # Calculate position size using ultra-aggressive risk manager
+        base_qty = self.risk_manager.calculate_position_size(
+            balance, current_price, signal['structure_stop']
         )
         
-        # Apply sizing multiplier
+        # Apply ultra-aggressive sizing multiplier
         sizing_multiplier = self.strategy_manager.get_position_sizing_multiplier(
             strategy_type, market_info
         )
@@ -271,154 +328,116 @@ class TradeEngine:
         formatted_qty = self.format_quantity(qty)
         
         if formatted_qty == "0" or float(formatted_qty) < 0.001:
-            print(f"❌ Position too small: {formatted_qty}")
+            self.rejections['position_too_small'] += 1
             return
         
+        # Calculate actual position size
         position_size_usdt = float(formatted_qty) * current_price
         
-        # Fee efficiency validation
-        fee_analysis = self.risk_manager.get_fee_analysis(position_size_usdt)
-        fee_pct = float(fee_analysis['efficiency_metrics']['fee_percentage'].rstrip('%'))
-        
-        if fee_pct > 5.0:  # Reject if fees > 5% of expected gross
-            self.rejections['fee_inefficient'] += 1
-            print(f"❌ Fee inefficient: {fee_pct:.1f}% of expected gross")
+        # Validate fee efficiency (ultra-aggressive thresholds)
+        expected_profit = position_size_usdt * signal.get('risk_reward_ratio', 1.3) * 0.015  # Estimate
+        if not self.risk_manager.validate_fee_efficiency(position_size_usdt, expected_profit):
+            self.rejections['fee_efficiency'] += 1
             return
         
-        # Get order strategy (limit-first with IOC fallback)
-        order_strategy = self.risk_manager.get_order_strategy(
-            signal['action'], current_price, signal.get('confidence', 75)
-        )
+        # ULTRA-AGGRESSIVE: Limit-first order execution
+        success = await self._execute_limit_first_order(signal, formatted_qty, current_price, market_info)
         
-        side = "Buy" if signal['action'] == 'BUY' else "Sell"
-        
-        # Execute limit-first strategy
-        execution_result = await self._execute_limit_first_order(
-            side, formatted_qty, order_strategy, current_price
-        )
-        
-        if execution_result['success']:
-            # Record trade execution
+        if success:
+            # Record trade for cooldown and frequency tracking
             self.strategy_manager.record_trade()
+            
             self.successful_entries += 1
-            self.position_entry_price = execution_result['fill_price']
+            self.position_entry_price = current_price
             self.position_size_usdt = position_size_usdt
-            self.highest_profit = 0  # Reset for new position
+            self.highest_profit = 0.0  # Reset for trailing stops
             
-            # Update order statistics
-            if execution_result['order_type'] == 'limit':
-                self.order_stats['limit_fills'] += 1
-                savings = position_size_usdt * (self.risk_manager.taker_fee_rate - self.risk_manager.maker_fee_rate)
-                self.order_stats['total_maker_savings'] += float(savings)
-            else:
-                self.order_stats['market_fills'] += 1
+            break_even_fees = self.risk_manager.get_break_even_pnl(position_size_usdt)
             
-            self._log_trade("ENTRY", execution_result['fill_price'], signal=signal, 
-                           quantity=formatted_qty, strategy=strategy_type, 
-                           position_size_usdt=position_size_usdt,
-                           order_type=execution_result['order_type'],
-                           fee_analysis=fee_analysis)
+            self._log_trade("ENTRY", current_price, signal=signal, quantity=formatted_qty, 
+                           strategy=strategy_type, position_size_usdt=position_size_usdt,
+                           break_even_fees=break_even_fees)
                            
-            await self.notifier.send_trade_entry(signal, execution_result['fill_price'], 
-                                               formatted_qty, self._get_strategy_info())
+            await self.notifier.send_trade_entry(signal, current_price, formatted_qty, 
+                                               self._get_strategy_info())
             
-            print(f"✅ {execution_result['order_type'].upper()} order filled: {signal['action']} {formatted_qty} @ ${execution_result['fill_price']:.2f}")
-            print(f"   Position: ${position_size_usdt:.2f} | Fee efficiency: {fee_pct:.1f}%")
+            print(f"✅ ULTRA-AGGRESSIVE: {signal['action']} {formatted_qty} @ ${current_price:.4f}")
+            print(f"   📊 Position: ${position_size_usdt:.0f} | Strategy: {strategy_type}")
+            print(f"   💰 Break-even: ${break_even_fees:.2f} | Target: ${signal.get('net_profit_target', 0)}")
     
-    async def _execute_limit_first_order(self, side: str, quantity: str, 
-                                       order_strategy: Dict, current_price: float) -> Dict:
-        """Execute limit-first order strategy with IOC fallback"""
+    async def _execute_limit_first_order(self, signal, quantity, current_price, market_info):
+        """ULTRA-AGGRESSIVE: Limit-first order execution with tight spreads"""
+        side = "Buy" if signal['action'] == 'BUY' else "Sell"
+        confidence = signal.get('confidence', 65)
         
-        # Step 1: Try limit order first
-        limit_price = order_strategy['primary_order']['price']
+        # Determine limit offset based on confidence (ultra-aggressive - tighter spreads)
+        if confidence >= 85:
+            offset_pct = 0.0003    # 0.03% (REDUCED)
+        elif confidence >= 75:
+            offset_pct = 0.0006    # 0.06% (REDUCED)
+        else:
+            offset_pct = 0.001     # 0.1% (REDUCED)
+        
+        # Calculate limit price
+        if side == "Buy":
+            limit_price = current_price * (1 - offset_pct)
+        else:
+            limit_price = current_price * (1 + offset_pct)
         
         try:
-            print(f"🎯 Trying LIMIT order: {side} {quantity} @ ${limit_price:.2f}")
+            self.order_stats['limit_attempts'] += 1
+            self.order_stats['total_orders'] += 1
             
+            # Try limit order first (IOC - Immediate or Cancel)
             limit_order = self.exchange.place_order(
-                category="linear",
+                category="linear", 
                 symbol=self.symbol,
                 side=side,
                 orderType="Limit",
                 qty=quantity,
-                price=f"{limit_price:.2f}",
-                timeInForce="IOC"  # Immediate-or-Cancel
+                price=f"{limit_price:.4f}",
+                timeInForce="IOC"  # Immediate or Cancel
             )
             
             if limit_order.get('retCode') == 0:
-                # Wait briefly to check if filled
-                await asyncio.sleep(0.5)
-                
+                # Check if limit order filled
+                await asyncio.sleep(0.1)  # Brief wait
                 order_id = limit_order['result']['orderId']
-                order_status = self.exchange.get_open_orders(
-                    category="linear", symbol=self.symbol, orderId=order_id
-                )
                 
+                order_status = self.exchange.get_open_orders(category="linear", symbol=self.symbol)
                 if order_status.get('retCode') == 0:
-                    orders = order_status['result']['list']
+                    open_orders = order_status['result']['list']
+                    order_exists = any(order['orderId'] == order_id for order in open_orders)
                     
-                    if not orders:  # Order filled completely
-                        # Get fill details
-                        fills = self.exchange.get_executions(
-                            category="linear", symbol=self.symbol, orderId=order_id
-                        )
-                        
-                        if fills.get('retCode') == 0 and fills['result']['list']:
-                            fill_price = float(fills['result']['list'][0]['execPrice'])
-                            return {
-                                'success': True,
-                                'order_type': 'limit',
-                                'fill_price': fill_price,
-                                'method': 'limit_ioc_full_fill'
-                            }
-                    
-                    else:  # Order still open or partially filled
-                        # Cancel remaining quantity
-                        self.exchange.cancel_order(
-                            category="linear", symbol=self.symbol, orderId=order_id
-                        )
-                        
-                        # Check for partial fills
-                        fills = self.exchange.get_executions(
-                            category="linear", symbol=self.symbol, orderId=order_id
-                        )
-                        
-                        if fills.get('retCode') == 0 and fills['result']['list']:
-                            # Had partial fill, record it
-                            self.order_stats['partial_fills'] += 1
-                            print(f"📊 Partial limit fill detected, proceeding to market order")
-        
-        except Exception as e:
-            print(f"⚠️ Limit order failed: {e}")
-        
-        # Step 2: Fallback to market order
-        print(f"🏃 Fallback to MARKET order: {side} {quantity}")
-        
-        try:
+                    if not order_exists:  # Order filled
+                        self.order_stats['limit_successes'] += 1
+                        self.order_stats['maker_fills'] += 1
+                        print(f"✅ LIMIT FILL: Maker order @ ${limit_price:.4f} (saved {offset_pct*100:.3f}%)")
+                        return True
+            
+            # Limit order didn't fill, place market order
+            print(f"⚡ Limit order timeout, executing market order...")
             market_order = self.exchange.place_order(
-                category="linear",
+                category="linear", 
                 symbol=self.symbol,
                 side=side,
-                orderType="Market",
-                qty=quantity,
+                orderType="Market", 
+                qty=quantity, 
                 timeInForce="IOC"
             )
             
             if market_order.get('retCode') == 0:
-                return {
-                    'success': True,
-                    'order_type': 'market',
-                    'fill_price': current_price,  # Approximate
-                    'method': 'market_fallback'
-                }
+                self.order_stats['taker_fills'] += 1
+                print(f"✅ MARKET FILL: Taker order @ ${current_price:.4f}")
+                return True
                 
         except Exception as e:
-            print(f"❌ Market order failed: {e}")
+            print(f"❌ Order execution error: {e}")
         
-        return {'success': False, 'order_type': 'failed', 'fill_price': 0}
+        return False
     
     async def _check_position_status(self):
-        """Check position status and update highest profit"""
+        """Check position status with ultra-aggressive monitoring"""
         try:
             positions = self.exchange.get_positions(category="linear", symbol=self.symbol)
             if positions.get('retCode') != 0:
@@ -443,25 +462,27 @@ class TradeEngine:
             self.position = pos_list[0]
             
             # Update highest profit for trailing stops
-            current_pnl = float(self.position.get('unrealisedPnl', 0))
-            if current_pnl > self.highest_profit:
-                self.highest_profit = current_pnl
+            unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
+            if unrealized_pnl > self.highest_profit:
+                self.highest_profit = unrealized_pnl
                 
-        except:
-            pass
+        except Exception as e:
+            print(f"❌ Position check error: {e}")
     
     async def _check_position_exit(self):
-        """Enhanced position exit checking with trailing stops"""
+        """ULTRA-AGGRESSIVE: Check position exit with ultra-tight trailing stops"""
         if not self.position or not self.position_start_time:
             return
         
-        current_price = float(self.price_data_1m['close'].iloc[-1])
+        current_price = float(self.price_data_3m['close'].iloc[-1])
         entry_price = self.position_entry_price or float(self.position.get('avgPrice', 0))
         side = self.position.get('side', '')
         
+        # Use Bybit's unrealized PnL
         unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
         position_age = (datetime.now() - self.position_start_time).total_seconds()
         
+        # Get position size for fee calculations
         position_size_usdt = self.position_size_usdt or (
             float(self.position.get('size', 0)) * entry_price
         )
@@ -469,21 +490,33 @@ class TradeEngine:
         if self.risk_manager.active_strategy != self.active_strategy:
             self.risk_manager.set_strategy(self.active_strategy)
         
-        # Enhanced exit check with trailing stops
+        # ULTRA-AGGRESSIVE: Check exit conditions with ultra-tight trailing
         should_close, reason = self.risk_manager.should_close_position(
-            current_price, entry_price, side, unrealized_pnl, position_age, 
-            position_size_usdt, self.highest_profit, self.current_atr
+            current_price, entry_price, side, unrealized_pnl, position_age, position_size_usdt
         )
+        
+        # Additional ultra-tight trailing stop check
+        if not should_close and self.active_strategy == "TREND" and unrealized_pnl > 0:
+            if self.current_atr > 0:
+                # Use 0.4% or 0.5 ATR, whichever is tighter
+                atr_distance = 0.5 * self.current_atr
+                pct_distance = current_price * 0.004  # 0.4%
+                trailing_distance = min(atr_distance, pct_distance)
+                
+                if side.lower() == 'buy' and current_price < (entry_price + trailing_distance):
+                    should_close, reason = True, "trailing_stop"
+                elif side.lower() == 'sell' and current_price > (entry_price - trailing_distance):
+                    should_close, reason = True, "trailing_stop"
         
         if should_close:
             await self._close_position(reason)
     
     async def _close_position(self, reason="Manual"):
-        """Close position with market order"""
+        """ULTRA-AGGRESSIVE: Close position with enhanced logging"""
         if not self.position:
             return
         
-        current_price = float(self.price_data_1m['close'].iloc[-1]) if len(self.price_data_1m) > 0 else 0
+        current_price = float(self.price_data_3m['close'].iloc[-1]) if len(self.price_data_3m) > 0 else 0
         unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
         
         side = "Sell" if self.position.get('side') == "Buy" else "Buy"
@@ -500,25 +533,24 @@ class TradeEngine:
                 
                 self._track_exit_reason(reason)
                 
-                self._log_trade("EXIT", current_price, reason=reason, 
-                               bybit_unrealized_pnl=unrealized_pnl, 
+                self._log_trade("EXIT", current_price, reason=reason, bybit_unrealized_pnl=unrealized_pnl, 
                                strategy=self.active_strategy, duration=duration, 
-                               position_size_usdt=self.position_size_usdt or 0,
-                               highest_profit=self.highest_profit)
+                               position_size_usdt=self.position_size_usdt or 0)
                 
                 exit_data = {'trigger': reason, 'strategy': self.active_strategy}
-                await self.notifier.send_trade_exit(exit_data, current_price, 
-                                                  unrealized_pnl, duration, self._get_strategy_info())
+                await self.notifier.send_trade_exit(exit_data, current_price, unrealized_pnl, duration, self._get_strategy_info())
+                
+                print(f"📤 EXIT: {reason} | PnL: ${unrealized_pnl:.2f} | Duration: {duration:.1f}s")
         except Exception as e:
             print(f"❌ Position close error: {e}")
     
     async def _on_strategy_switch(self, old_strategy, new_strategy):
-        """Handle strategy switch"""
+        """Handle ultra-aggressive strategy switch"""
         if self.position:
             await self._close_position("strategy_switch")
             
-            for _ in range(5):
-                await asyncio.sleep(1)
+            for _ in range(3):  # Reduced wait time
+                await asyncio.sleep(0.5)
                 await self._check_position_status()
                 if not self.position:
                     break
@@ -527,17 +559,16 @@ class TradeEngine:
                 self._reset_position()
         
         self.exit_reasons['strategy_switch'] += 1
+        print(f"🔄 STRATEGY SWITCH: {old_strategy} → {new_strategy}")
     
     async def _on_position_closed(self):
         """Handle position closed externally"""
         if self.position:
             unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
-            price = float(self.price_data_1m['close'].iloc[-1]) if len(self.price_data_1m) > 0 else 0
+            price = float(self.price_data_3m['close'].iloc[-1]) if len(self.price_data_3m) > 0 else 0
             self._track_exit_reason('position_closed')
-            self._log_trade("EXIT", price, reason="position_closed", 
-                           bybit_unrealized_pnl=unrealized_pnl, 
-                           strategy=self.active_strategy, 
-                           position_size_usdt=self.position_size_usdt or 0)
+            self._log_trade("EXIT", price, reason="position_closed", bybit_unrealized_pnl=unrealized_pnl, 
+                           strategy=self.active_strategy, position_size_usdt=self.position_size_usdt or 0)
     
     def _reset_position(self):
         """Reset position state"""
@@ -545,7 +576,7 @@ class TradeEngine:
         self.position_start_time = None
         self.position_entry_price = None
         self.position_size_usdt = None
-        self.highest_profit = 0
+        self.highest_profit = 0.0
     
     def _track_exit_reason(self, reason):
         """Track exit reason"""
@@ -555,54 +586,56 @@ class TradeEngine:
             self.exit_reasons['manual_exit'] += 1
     
     def _log_trade(self, action, price, **kwargs):
-        """Enhanced trade logging with order execution details"""
+        """ULTRA-AGGRESSIVE: Enhanced trade logging with fee model"""
         timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
         
         if action == "ENTRY":
             self.trade_id += 1
             signal = kwargs.get('signal', {})
             position_size_usdt = kwargs.get('position_size_usdt', 0)
-            order_type = kwargs.get('order_type', 'market')
-            fee_analysis = kwargs.get('fee_analysis', {})
+            break_even_fees = kwargs.get('break_even_fees', 0)
             
             log_data = {
                 'timestamp': timestamp, 'id': self.trade_id, 'action': 'ENTRY',
                 'strategy': kwargs.get('strategy', 'UNKNOWN'),
-                'side': signal.get('action', ''), 'price': round(price, 2), 
+                'side': signal.get('action', ''), 'price': round(price, 4), 
                 'size': kwargs.get('quantity', ''), 
-                'order_type': order_type,
                 'market_condition': self.market_info.get('condition', ''),
                 'adx': round(self.market_info.get('adx', 0), 1),
                 'confidence': round(signal.get('confidence', 0), 1),
                 'position_size_usdt': round(position_size_usdt, 2),
-                'fee_efficiency': fee_analysis.get('efficiency_metrics', {}),
-                'breakeven_rate': self.risk_manager.get_current_breakeven_rate() * 100
+                'break_even_fees': round(break_even_fees, 2),
+                'signal_reason': signal.get('signal_reason', 'unknown'),
+                'rsi': signal.get('rsi', 0),
+                'timeframe': signal.get('timeframe', '3m'),
+                'ultra_aggressive': True,
+                'note': f'Need ${break_even_fees:.2f} profit to cover 0.0615% fees'
             }
         else:
             duration = kwargs.get('duration', 0)
             bybit_pnl = kwargs.get('bybit_unrealized_pnl', 0)
             position_size_usdt = kwargs.get('position_size_usdt', 0)
-            highest_profit = kwargs.get('highest_profit', 0)
             
-            # Calculate fees based on actual order execution
+            # Calculate estimated net profit
             if position_size_usdt > 0:
-                fee_cost = position_size_usdt * float(self.risk_manager.total_cost_rate)
-                estimated_net = bybit_pnl - fee_cost
+                break_even_fees = self.risk_manager.get_break_even_pnl(position_size_usdt)
+                estimated_net = bybit_pnl - break_even_fees
             else:
                 estimated_net = bybit_pnl
-                fee_cost = 0
+                break_even_fees = 0
             
             log_data = {
                 'timestamp': timestamp, 'id': self.trade_id, 'action': 'EXIT',
                 'strategy': kwargs.get('strategy', 'UNKNOWN'),
                 'trigger': kwargs.get('reason', '').lower().replace(' ', '_'),
-                'price': round(price, 2), 
+                'price': round(price, 4), 
                 'bybit_unrealized_pnl': round(bybit_pnl, 2),
-                'estimated_fees': round(fee_cost, 2),
+                'estimated_fees': round(break_even_fees, 2),
                 'estimated_net_profit': round(estimated_net, 2),
-                'highest_profit': round(highest_profit, 2),
                 'hold_seconds': round(duration, 1),
-                'breakeven_rate_required': f"{self.risk_manager.get_current_breakeven_rate()*100:.1f}%"
+                'highest_profit': round(self.highest_profit, 2),
+                'ultra_aggressive': True,
+                'note': 'Ultra-aggressive: 0.0615% fee model with 3m timeframe'
             }
         
         try:
@@ -624,74 +657,97 @@ class TradeEngine:
             return 0
     
     def _get_strategy_info(self):
-        """Get current strategy information"""
-        return (self.range_strategy.get_strategy_info() if self.active_strategy == "RANGE" 
-                else self.trend_strategy.get_strategy_info())
+        """Get current ultra-aggressive strategy information"""
+        if self.active_strategy == "RANGE":
+            return self.range_strategy.get_strategy_info()
+        else:
+            return self.trend_strategy.get_strategy_info()
     
     def _display_status(self):
-        """Enhanced display with fee optimization metrics"""
+        """ULTRA-AGGRESSIVE: Display with enhanced metrics"""
         try:
-            price = float(self.price_data_1m['close'].iloc[-1])
-            time = self.price_data_1m.index[-1].strftime('%H:%M:%S')
+            price = float(self.price_data_3m['close'].iloc[-1]) if len(self.price_data_3m) > 0 else 0
+            time = datetime.now().strftime('%H:%M:%S')
             symbol_display = self.symbol.replace('USDT', '/USDT')
-            price_formatted = f"{price:,.2f}".replace(',', ' ')
+            price_formatted = f"{price:,.4f}".replace(',', ' ')
             
             print("\n" * 50)
             
             w = 85
-            print(f"{'='*w}\n⚡  {symbol_display} OPTIMIZED DUAL-STRATEGY BOT (Fee & Slippage Optimized)\n{'='*w}\n")
+            print(f"{'='*w}\n⚡  {symbol_display} ULTRA-AGGRESSIVE DUAL-STRATEGY BOT v3.0\n{'='*w}\n")
             
+            # Market analysis
             market_condition = self.market_info.get('condition', 'UNKNOWN')
             adx = self.market_info.get('adx', 0)
             confidence = self.market_info.get('confidence', 0)
+            vol_regime = self.market_info.get('volatility', 'NORMAL')
             
-            print("🧠  MARKET ANALYSIS & STRATEGY SELECTION\n" + "─"*w)
-            print(f"📊 Market Condition: {market_condition:<12} │ 📈 ADX: {adx:>5.1f} │ 🎯 Confidence: {confidence*100:>3.0f}%")
-            print(f"⚙️  Active Strategy: {self.active_strategy or 'NONE':<13} │ 🕐 Timeframe: {self._get_active_timeframe()}")
+            print("🧠  ULTRA MARKET ANALYSIS (3m + 15m)\n" + "─"*w)
+            print(f"📊 Condition: {market_condition:<12} │ 📈 ADX: {adx:>5.1f} │ 🎯 Confidence: {confidence*100:>3.0f}% │ 📊 Vol: {vol_regime}")
+            print(f"⚙️  Strategy: {self.active_strategy or 'NONE':<13} │ 🕐 Timeframe: 3m │ 🎯ATR: {self.current_atr:.6f}")
             
-            # Show corrected break-even rates
-            current_be = self.risk_manager.get_current_breakeven_rate() * 100
-            print(f"📈 Break-even Win Rate: {current_be:.1f}% (CORRECTED FORMULA)")
+            # Signal frequency tracking
+            freq_info = self.market_info.get('signal_frequency', {})
+            signals_hour = freq_info.get('signals_last_hour', 0)
+            freq_status = freq_info.get('status', 'UNKNOWN')
+            freq_score = freq_info.get('frequency_score', 0)
             
-            # Show cooldown status
+            print(f"🎯 Signal Freq: {signals_hour}/hour │ Target: 8-12/hour │ Status: {freq_status} │ Score: {freq_score:.1f}%")
+            
+            # Cooldown status
             trade_cooldown = self.market_info.get('trade_cooldown_remaining', 0)
             if trade_cooldown > 0:
                 minutes = int(trade_cooldown / 60)
                 seconds = int(trade_cooldown % 60)
                 print(f"⏳ Trade Cooldown: {minutes}m {seconds}s remaining")
             else:
-                print("✅ Ready for new trades")
+                print("✅ Ready for ultra-aggressive trading")
                 
             print("─"*w + "\n")
             
-            # Fee optimization metrics
-            print("💰  FEE OPTIMIZATION METRICS\n" + "─"*w)
-            total_orders = self.order_stats['limit_fills'] + self.order_stats['market_fills']
-            if total_orders > 0:
-                limit_fill_rate = (self.order_stats['limit_fills'] / total_orders) * 100
-                print(f"📈 Limit Fill Rate: {limit_fill_rate:.1f}% │ Maker Savings: ${self.order_stats['total_maker_savings']:.2f}")
-                print(f"🎯 Limit Orders: {self.order_stats['limit_fills']} │ Market Orders: {self.order_stats['market_fills']} │ Partial: {self.order_stats['partial_fills']}")
+            # Strategy status
+            print("📋  ULTRA-AGGRESSIVE STRATEGY STATUS\n" + "─"*w)
+            if self.active_strategy == "RANGE":
+                print(f"🎯 RSI(6) + BB(15,1.8) Range Strategy")
+                print(f"📊 Target: ${self.risk_manager.range_config['target_position_usdt']} │ Hold: {self.risk_manager.range_config['max_position_time']//60}min │ R/R: 1:1.3")
+            elif self.active_strategy == "TREND":
+                print(f"📈 RSI(6) + EMA(5/13) Trend Strategy")
+                print(f"📊 Target: ${self.risk_manager.trend_config['target_position_usdt']} │ Hold: {self.risk_manager.trend_config['max_position_time']//60}min │ R/R: 1:1.5")
             else:
-                print("📊 No orders executed yet")
-            
-            # Show blended fee rate
-            blended_fee = float(self.risk_manager.blended_fee_rate) * 100
-            print(f"💸 Blended Fee Rate: {blended_fee:.3f}% (30% maker, 70% taker)")
+                print("⚙️  Initializing ultra-aggressive strategies...")
+                
             print("─"*w + "\n")
             
-            print("📊  PERFORMANCE METRICS\n" + "─"*w)
+            # Order execution stats
+            total_orders = self.order_stats['total_orders']
+            if total_orders > 0:
+                maker_rate = (self.order_stats['maker_fills'] / total_orders) * 100
+                limit_success_rate = (self.order_stats['limit_successes'] / max(self.order_stats['limit_attempts'], 1)) * 100
+                
+                print("💹  ORDER EXECUTION OPTIMIZATION\n" + "─"*w)
+                print(f"📊 Total Orders: {total_orders} │ Maker Fills: {self.order_stats['maker_fills']} ({maker_rate:.1f}%)")
+                print(f"🎯 Limit Success: {limit_success_rate:.1f}% │ Fee Savings: ~{maker_rate*0.45:.1f}% per trade")
+                print("─"*w + "\n")
+            
+            # Performance metrics
+            print("📊  ULTRA-AGGRESSIVE PERFORMANCE\n" + "─"*w)
             total_trades = sum(self.exit_reasons.values())
             total_signals = self.rejections.get('total_signals', 0)
-            fee_rejected = self.rejections.get('fee_inefficient', 0)
+            accept_rate = (total_trades/max(total_signals,1)*100)
             
-            print(f"🔢 Total Trades: {total_trades:>3} │ 📈 Signals: {total_signals:>3} │ ✅ Accept Rate: {(total_trades/max(total_signals,1)*100):>4.1f}%")
-            print(f"💸 Fee Rejected: {fee_rejected:>3} │ 📝 Check logs/trades.log for detailed analysis")
+            print(f"🔢 Trades: {total_trades:>3} │ Signals: {total_signals:>3} │ Accept: {accept_rate:>4.1f}% │ ADX Threshold: 15+")
+            
+            if total_trades > 0:
+                top_exits = sorted(self.exit_reasons.items(), key=lambda x: x[1], reverse=True)[:3]
+                exit_str = " │ ".join([f"{k.replace('_', ' ').title()}: {v}" for k, v in top_exits if v > 0])
+                if exit_str:
+                    print(f"📝 Exits: {exit_str}")
             
             print("─"*w + "\n")
-            print(f"⏰ {time}   |   💰 ${price_formatted}   |   📊 ATR: {self.current_atr:.4f}")
+            print(f"⏰ {time}   |   💰 ${price_formatted}   |   🚀 Ultra-Aggressive Mode Active")
             print()
             
-            # Position info with trailing stop details
+            # Position info
             if self.position:
                 unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
                 entry = self.position_entry_price or float(self.position.get('avgPrice', 0))
@@ -701,28 +757,26 @@ class TradeEngine:
                 age = (datetime.now() - self.position_start_time).total_seconds() if self.position_start_time else 0
                 
                 position_size_usdt = self.position_size_usdt or (float(size) * entry)
-                fee_cost = position_size_usdt * float(self.risk_manager.total_cost_rate)
-                net_pnl = unrealized_pnl - fee_cost
+                break_even_fees = self.risk_manager.get_break_even_pnl(position_size_usdt)
+                net_pnl = unrealized_pnl - break_even_fees
                 
                 emoji = "🟢" if side == "Buy" else "🔴"
-                print(f"{emoji} {side} Position: {size} @ ${entry:.2f} │ Strategy: {self.active_strategy}")
-                print(f"   Gross PnL: ${unrealized_pnl:.2f} │ Fees: ${fee_cost:.2f} │ Net: ${net_pnl:.2f}")
-                print(f"   Peak PnL: ${self.highest_profit:.2f} │ Age: {age:.1f}s │ Max: {self.risk_manager.get_max_position_time()}s")
+                print(f"{emoji} {side} Position: {size} @ ${entry:.4f} │ Strategy: {self.active_strategy}")
+                print(f"   💰 Gross: ${unrealized_pnl:.2f} │ Fees: ${break_even_fees:.2f} │ Net: ${net_pnl:.2f}")
+                print(f"   ⏱️  Age: {age:.0f}s │ Max: {self.risk_manager.get_max_position_time()}s │ Peak: ${self.highest_profit:.2f}")
                 
-                if self.active_strategy == "TREND" and self.highest_profit > 0:
-                    breakeven_threshold = position_size_usdt * 0.018 * 1.2  # 1.2R for trend
-                    if unrealized_pnl >= breakeven_threshold:
-                        print(f"   🎯 Trailing Stop Active (1.2R+ move) │ ATR: {self.current_atr:.4f}")
-                
+                if self.active_strategy == "TREND" and net_pnl > 10:
+                    print(f"   🎯 Trailing: 0.4% active │ ATR: {self.current_atr:.6f}")
             else:
-                print("⚡  No Position — Optimized Scanner Active (Limit-First Orders)")
+                print("⚡ No Position — Ultra-Aggressive Scanner Active")
+                print("   🎯 RSI(6) + EMA(5/13) + BB(15) + ADX >15 Detection")
+                print("   ⏱️  2min trade cooldowns │ 3min strategy cooldowns")
             
-            print("─" * 70)
+            print("─" * w)
             
         except Exception as e:
             print(f"❌ Display error: {e}")
     
     def _get_active_timeframe(self):
         """Get active timeframe string"""
-        timeframes = {"RANGE": "1m", "TREND": "15m"}
-        return timeframes.get(self.active_strategy, "Auto")
+        return "3m"  # Ultra-aggressive uses 3m primarily

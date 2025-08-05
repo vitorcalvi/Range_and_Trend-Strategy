@@ -1,88 +1,60 @@
 import os
-from decimal import Decimal, ROUND_HALF_UP
 from dotenv import load_dotenv
 from typing import Tuple, Dict, Any
+import numpy as np
 
 load_dotenv()
 
 class RiskManager:
-    """Corrected Break-Even Formulas & Dynamic Position Sizing"""
+    """ULTRA-AGGRESSIVE: Risk Manager with optimized fee model and high-frequency sizing"""
 
     def __init__(self):
         self.symbol = os.getenv('TRADING_SYMBOL', 'ETHUSDT')
         
-        # CORRECTED: Fee model with maker/taker blend
-        self.taker_fee_rate = Decimal('0.00055')    # 0.055% taker (market orders)
-        self.maker_fee_rate = Decimal('0.0001')     # 0.01% maker (limit orders)
-        self.maker_fill_ratio = Decimal('0.3')      # 30% maker execution assumption
+        # ENHANCED FEE MODEL (ULTRA-AGGRESSIVE)
+        self.taker_fee = 0.00055      # 0.055% market orders
+        self.maker_fee = 0.0001       # 0.01% limit orders  
+        self.maker_fill_ratio = 0.40  # 40% limit order fills (optimized)
+        self.blended_fee = (self.maker_fee * self.maker_fill_ratio + 
+                           self.taker_fee * (1 - self.maker_fill_ratio))  # 0.000415
+        self.slippage = 0.0002        # 0.02% slippage estimation
+        self.fee_rate = self.blended_fee + self.slippage  # 0.000615 total cost
         
-        # Blended fee rate: 30% maker + 70% taker
-        self.blended_fee_rate = (self.maker_fill_ratio * self.maker_fee_rate + 
-                                (1 - self.maker_fill_ratio) * self.taker_fee_rate)
-        # = 0.3 × 0.0001 + 0.7 × 0.00055 = 0.00003 + 0.000385 = 0.000415 ≈ 0.042%
-        
-        self.slippage_est = Decimal('0.0002')       # 0.02% slippage
-        self.total_cost_rate = self.blended_fee_rate + self.slippage_est  # ~0.062%
-        
-        # Range strategy config
+        # ULTRA-AGGRESSIVE RANGE CONFIG (High Frequency)
         self.range_config = {
-            'risk_percentage': Decimal('0.02'),     # 1R = 2% of position
-            'reward_ratio': Decimal('1.5'),         # 1.5R target
-            'max_position_time': 600,               # 10 minutes
-            'emergency_stop_pct': Decimal('0.025'), # 2.5% hard stop
+            'min_position_usdt': 1500,   # REDUCED for frequency
+            'max_position_usdt': 4000,   # REDUCED for frequency  
+            'target_position_usdt': 2500, # Optimal size for range
+            'risk_percentage': 0.015,    # 1.5% risk (tighter)
+            'reward_ratio': 1.3,         # REDUCED: 1.3R for faster exits
+            'gross_profit_target': 65,   # Gross profit before fees
+            'net_profit_target': 60,     # Net profit after fees
+            'max_position_time': 300,    # 5 minutes max hold
+            'emergency_stop_pct': 0.015, # 1.5% emergency stop
             'leverage': 10,
-            'fee_target_pct': Decimal('0.03'),      # Fees should be 3% of expected gross
-            'min_position_usdt': 2000,              # Minimum for efficiency
-            'max_position_usdt': 8000               # Maximum for safety
+            'fee_target_percentage': 0.02, # 2% of gross profit
         }
         
-        # Trend strategy config  
+        # ULTRA-AGGRESSIVE TREND CONFIG (High Frequency)
         self.trend_config = {
-            'risk_percentage': Decimal('0.018'),    # 1R = 1.8% of position
-            'reward_ratio': Decimal('2.0'),         # 2R target
-            'max_position_time': 2400,              # 40 minutes
-            'emergency_stop_pct': Decimal('0.025'), # 2.5% hard stop
-            'trailing_stop_atr': Decimal('0.5'),    # 0.5 ATR trailing
-            'profit_lock_threshold': Decimal('1.2'), # Lock at 1.2R breakeven
+            'min_position_usdt': 2000,   # REDUCED for frequency
+            'max_position_usdt': 5000,   # REDUCED for frequency
+            'target_position_usdt': 3000, # Optimal size for trend
+            'risk_percentage': 0.012,    # 1.2% risk (tighter)
+            'reward_ratio': 1.5,         # REDUCED: 1.5R vs 2R
+            'gross_profit_target': 72,   # Gross profit before fees  
+            'net_profit_target': 67,     # Net profit after fees
+            'max_position_time': 720,    # 12 minutes max hold (REDUCED)
+            'emergency_stop_pct': 0.015, # 1.5% emergency stop
+            'trailing_stop_pct': 0.004,  # 0.4% ultra-tight trailing
+            'profit_lock_threshold': 1.0, # 1R activation (REDUCED)
+            'max_drawdown_from_peak': 0.15, # 15% max drawdown
             'leverage': 10,
-            'fee_target_pct': Decimal('0.025'),     # Fees should be 2.5% of expected gross
-            'min_position_usdt': 3000,
-            'max_position_usdt': 10000
+            'fee_target_percentage': 0.018, # 1.8% of gross profit
         }
         
         self.active_config = self.range_config.copy()
         self.active_strategy = "RANGE"
-        
-        # Calculate corrected break-even rates
-        self._calculate_breakeven_rates()
-    
-    def _calculate_breakeven_rates(self):
-        """CORRECTED: Calculate actual break-even win rates with fees"""
-        
-        # Range strategy: 1.5R target, 1R risk
-        range_risk_pct = float(self.range_config['risk_percentage'])      # 2%
-        range_reward_pct = range_risk_pct * float(self.range_config['reward_ratio'])  # 3%
-        fee_pct = float(self.total_cost_rate)  # ~0.062%
-        
-        # CORRECTED FORMULA:
-        # Win_Rate × (Reward - Fee) = (1 - Win_Rate) × (Risk + Fee)
-        # Solving: Win_Rate = (Risk + Fee) / (Risk + Fee + Reward - Fee)
-        # Simplified: Win_Rate = (Risk + Fee) / (Risk + Reward)
-        
-        range_numerator = range_risk_pct + fee_pct      # 0.02 + 0.00062 = 0.02062
-        range_denominator = range_risk_pct + range_reward_pct  # 0.02 + 0.03 = 0.05
-        range_breakeven = range_numerator / range_denominator  # 0.41240 = 41.24%
-        
-        # Trend strategy: 2R target, 1R risk  
-        trend_risk_pct = float(self.trend_config['risk_percentage'])      # 1.8%
-        trend_reward_pct = trend_risk_pct * float(self.trend_config['reward_ratio'])  # 3.6%
-        
-        trend_numerator = trend_risk_pct + fee_pct      # 0.018 + 0.00062 = 0.01862
-        trend_denominator = trend_risk_pct + trend_reward_pct  # 0.018 + 0.036 = 0.054
-        trend_breakeven = trend_numerator / trend_denominator  # 0.34481 = 34.48%
-        
-        self.range_breakeven_rate = range_breakeven
-        self.trend_breakeven_rate = trend_breakeven
     
     def set_strategy(self, strategy_type: str):
         """Set active strategy configuration"""
@@ -94,295 +66,270 @@ class RiskManager:
             self.active_strategy = "RANGE"
             self.active_config = self.range_config.copy()
     
-    def calculate_dynamic_position_size(self, balance: float, entry_price: float, 
-                                      stop_price: float, expected_hold_minutes: int = 10) -> float:
-        """DYNAMIC: Size position so fees are 2-5% of expected gross profit"""
+    def get_break_even_pnl(self, position_size_usdt: float) -> float:
+        """Calculate break-even PnL with enhanced fee model
+        
+        CORRECTED Fee Model: 0.0615% total trading cost
+        Break-even PnL = Position_Size × 0.000615
+        """
+        return position_size_usdt * self.fee_rate
+    
+    def get_min_profitable_target(self, position_size_usdt: float) -> float:
+        """Calculate minimum profitable target (ultra-aggressive)"""
+        break_even = self.get_break_even_pnl(position_size_usdt)
+        return break_even + 10.0  # REDUCED: $10 minimum net profit vs $15
+    
+    def calculate_position_size(self, balance: float, entry_price: float, stop_price: float) -> float:
+        """ULTRA-AGGRESSIVE: Dynamic position sizing for high frequency"""
         if balance <= 0 or entry_price <= 0 or stop_price <= 0:
             return 0
         
-        # Calculate risk and reward percentages
-        risk_pct = abs(entry_price - stop_price) / entry_price
-        reward_pct = risk_pct * float(self.active_config['reward_ratio'])
+        # Get target position size based on strategy
+        target_usdt = self.active_config['target_position_usdt']
+        min_usdt = self.active_config['min_position_usdt']
+        max_usdt = self.active_config['max_position_usdt']
         
-        # Target fee percentage of expected gross profit
-        fee_target_pct = float(self.active_config['fee_target_pct'])
+        # Risk-based sizing
+        risk_amount = balance * self.active_config['risk_percentage']
+        stop_distance = abs(entry_price - stop_price) / entry_price
         
-        # Calculate position size where fees = target % of expected gross
-        # fee_cost = position_size × total_cost_rate
-        # expected_gross = position_size × reward_pct
-        # Target: fee_cost = fee_target_pct × expected_gross
-        # position_size × total_cost_rate = fee_target_pct × position_size × reward_pct
-        # total_cost_rate = fee_target_pct × reward_pct
-        # position_size can be any value, but we want optimal fee efficiency
+        if stop_distance == 0:
+            return 0
         
-        # Calculate optimal position size for fee efficiency
-        if reward_pct > 0:
-            # We want: fees / expected_gross = fee_target_pct
-            # fees = position_size × total_cost_rate  
-            # expected_gross = position_size × reward_pct
-            # So: position_size × total_cost_rate = fee_target_pct × position_size × reward_pct
-            # This is always true for any position size, so we need other constraints
-            
-            # Use fee efficiency ratio instead
-            min_fee_efficiency = 1 / fee_target_pct  # If target is 3%, min efficiency is 33x
-            min_position_for_efficiency = 1000 / (reward_pct * min_fee_efficiency)
-            
-            # Calculate position size based on reward and fee efficiency
-            target_position = max(
-                float(self.active_config['min_position_usdt']),
-                min_position_for_efficiency
-            )
-            
-            # Safety limits
-            max_position_by_balance = balance * 0.25  # Max 25% of balance
-            max_position_by_config = float(self.active_config['max_position_usdt'])
-            
-            target_position = min(target_position, max_position_by_balance, max_position_by_config)
-            
-            return target_position / entry_price
+        # Calculate position size based on risk
+        risk_based_size = risk_amount / stop_distance / entry_price
+        risk_based_usdt = risk_based_size * entry_price
         
-        return 0
-    
-    def get_fee_analysis(self, position_size_usdt: float) -> Dict[str, Any]:
-        """Analyze fee efficiency for a given position size"""
-        position_decimal = Decimal(str(position_size_usdt))
+        # Dynamic sizing based on market conditions
+        if risk_based_usdt < min_usdt:
+            position_usdt = min_usdt
+        elif risk_based_usdt > max_usdt:
+            position_usdt = max_usdt
+        else:
+            # Blend target size with risk-based size
+            position_usdt = (target_usdt * 0.6 + risk_based_usdt * 0.4)
         
-        # Calculate different fee components
-        maker_fees = position_decimal * self.maker_fee_rate * 2  # Round trip
-        taker_fees = position_decimal * self.taker_fee_rate * 2  # Round trip  
-        blended_fees = position_decimal * self.blended_fee_rate * 2  # Round trip
-        slippage_cost = position_decimal * self.slippage_est
-        total_cost = blended_fees + slippage_cost
+        # Final safety checks
+        max_balance_pct = 0.15  # Max 15% of balance (REDUCED for high frequency)
+        max_allowed = balance * max_balance_pct
+        position_usdt = min(position_usdt, max_allowed)
         
-        # Calculate expected profit
-        risk_pct = self.active_config['risk_percentage']
-        reward_pct = risk_pct * self.active_config['reward_ratio']
-        expected_gross = position_decimal * reward_pct
+        # Validate fee efficiency (ultra-aggressive thresholds)
+        break_even_fees = self.get_break_even_pnl(position_usdt)
+        fee_efficiency = self.active_config['fee_target_percentage']
         
-        return {
-            'position_size_usdt': float(position_decimal),
-            'fee_breakdown': {
-                'maker_only': f"${float(maker_fees):.2f}",
-                'taker_only': f"${float(taker_fees):.2f}",
-                'blended_30_70': f"${float(blended_fees):.2f}",
-                'slippage': f"${float(slippage_cost):.2f}",
-                'total_cost': f"${float(total_cost):.2f}"
-            },
-            'efficiency_metrics': {
-                'expected_gross': f"${float(expected_gross):.2f}",
-                'fee_percentage': f"{float(total_cost/expected_gross)*100:.1f}%",
-                'profit_to_fee_ratio': f"{float(expected_gross/total_cost):.1f}x",
-                'breakeven_rate': f"{self.get_current_breakeven_rate()*100:.1f}%"
-            }
-        }
-    
-    def get_current_breakeven_rate(self) -> float:
-        """Get corrected break-even rate for current strategy"""
-        return (self.range_breakeven_rate if self.active_strategy == "RANGE" 
-                else self.trend_breakeven_rate)
+        expected_gross_profit = position_usdt * stop_distance * self.active_config['reward_ratio']
+        if break_even_fees > expected_gross_profit * fee_efficiency:
+            # Scale down position to meet fee efficiency
+            position_usdt *= 0.8
+        
+        return max(position_usdt / entry_price, 0)
     
     def should_close_position(self, current_price: float, entry_price: float, side: str, 
                              unrealized_pnl: float, position_age_seconds: float, 
-                             position_size_usdt: float = 0, highest_profit: float = 0,
-                             atr_value: float = 0) -> Tuple[bool, str]:
-        """Enhanced exit logic with trailing stops"""
+                             position_size_usdt: float = 0) -> Tuple[bool, str]:
+        """ULTRA-AGGRESSIVE: Exit conditions with tighter timing"""
         if entry_price <= 0:
             return False, "hold"
         
-        # Calculate position metrics
-        position_decimal = Decimal(str(position_size_usdt)) if position_size_usdt > 0 else Decimal('3000')
-        risk_pct = self.active_config['risk_percentage']
-        risk_amount = float(position_decimal * risk_pct)
+        # Calculate fees for exit decisions
+        fees = self.get_break_even_pnl(position_size_usdt) if position_size_usdt > 0 else 0
         
-        # Emergency stop
-        emergency_threshold = -float(position_decimal * self.active_config['emergency_stop_pct'])
+        # Emergency stop: 1.5% loss + fees (TIGHTER)
+        emergency_threshold = -(position_size_usdt * self.active_config['emergency_stop_pct'] + fees)
         if unrealized_pnl <= emergency_threshold:
             return True, "emergency_stop"
         
-        # Max hold time
+        # Max hold time exceeded (MUCH SHORTER)
         if position_age_seconds >= self.active_config['max_position_time']:
             return True, "max_hold_time"
         
-        # Strategy-specific exits with trailing
+        # Strategy-specific exits
         if self.active_strategy == "RANGE":
-            return self._check_range_exits(unrealized_pnl, position_age_seconds, risk_amount, position_decimal)
+            return self._check_range_exits_ultra(unrealized_pnl, position_age_seconds, fees, position_size_usdt)
         else:
-            return self._check_trend_exits_with_trailing(
-                unrealized_pnl, position_age_seconds, risk_amount, position_decimal,
-                current_price, entry_price, side, highest_profit, atr_value
-            )
+            return self._check_trend_exits_ultra(entry_price, current_price, side, unrealized_pnl, 
+                                               position_age_seconds, fees, position_size_usdt)
     
-    def _check_trend_exits_with_trailing(self, unrealized_pnl: float, position_age_seconds: float, 
-                                       risk_amount: float, position_decimal: Decimal,
-                                       current_price: float, entry_price: float, side: str,
-                                       highest_profit: float, atr_value: float) -> Tuple[bool, str]:
-        """Trend exits with 1.2R breakeven and trailing stops"""
+    def _check_range_exits_ultra(self, unrealized_pnl: float, position_age_seconds: float, 
+                                 fees: float, position_size_usdt: float) -> Tuple[bool, str]:
+        """ULTRA-AGGRESSIVE: Range strategy exits (5-minute max hold)"""
+        gross_target = self.active_config['gross_profit_target']  # $65
         
-        # Calculate targets
-        reward_ratio = self.active_config['reward_ratio']
-        target_profit = risk_amount * float(reward_ratio)  # 2R
-        breakeven_profit = risk_amount * 1.2  # 1.2R breakeven threshold
-        
-        # Subtract fees
-        fees = float(position_decimal * self.total_cost_rate)
-        net_target = target_profit - fees
-        net_breakeven = breakeven_profit - fees
-        
-        # Full target hit
-        if unrealized_pnl >= net_target:
+        # Hit profit target
+        if unrealized_pnl >= gross_target:
             return True, "profit_target"
         
-        # Trailing stop after 1.2R breakeven move
-        if unrealized_pnl >= net_breakeven and highest_profit >= net_breakeven:
-            
-            # Calculate trailing stop using ATR
-            if atr_value > 0:
-                trail_distance = atr_value * float(self.active_config['trailing_stop_atr'])  # 0.5 ATR
-            else:
-                # Fallback: use percentage-based trailing
-                trail_distance = current_price * 0.005  # 0.5%
-            
-            # Calculate trailing stop level
-            if side.lower() == 'buy':
-                trailing_stop_price = current_price - trail_distance
-                # Check if current profit is significantly below highest profit
-                if unrealized_pnl <= highest_profit * 0.8:  # 20% drawdown from peak
-                    return True, "trailing_stop"
-            else:
-                trailing_stop_price = current_price + trail_distance
-                if unrealized_pnl <= highest_profit * 0.8:
-                    return True, "trailing_stop"
+        # Quick profit taking (ultra-aggressive)
+        quick_target = fees + 25  # $25 net profit minimum
+        if unrealized_pnl >= quick_target and position_age_seconds >= 120:  # After 2 minutes
+            return True, "profit_target"
         
-        # Profit lock at 60% of max time if above breakeven
-        if (position_age_seconds >= self.active_config['max_position_time'] * 0.6 and 
-            unrealized_pnl >= net_breakeven * 0.8):
-            return True, "profit_lock"
-        
-        # Stop loss
-        stop_loss = -(risk_amount + fees)
-        if unrealized_pnl <= stop_loss:
-            return True, "stop_loss"
+        # Time-based exits (much faster)
+        time_threshold = self.active_config['max_position_time'] * 0.6  # 60% of max time (3 minutes)
+        if position_age_seconds >= time_threshold:
+            loss_threshold = -(fees + 15)  # Allow $15 loss beyond fees
+            if unrealized_pnl <= loss_threshold:
+                return True, "timeout_no_profit"
+            elif unrealized_pnl >= fees + 8:  # Small profit after 3 minutes
+                return True, "profit_target"
         
         return False, "hold"
     
-    def _check_range_exits(self, unrealized_pnl: float, position_age_seconds: float, 
-                          risk_amount: float, position_decimal: Decimal) -> Tuple[bool, str]:
-        """Range exits with corrected targets"""
+    def _check_trend_exits_ultra(self, entry_price: float, current_price: float, side: str,
+                                 unrealized_pnl: float, position_age_seconds: float, 
+                                 fees: float, position_size_usdt: float) -> Tuple[bool, str]:
+        """ULTRA-AGGRESSIVE: Trend strategy exits (12-minute max, 0.4% trailing)"""
+        gross_target = self.active_config['gross_profit_target']  # $72
         
-        # Calculate 1.5R target
-        reward_ratio = self.active_config['reward_ratio']
-        target_profit = risk_amount * float(reward_ratio)
-        
-        # Subtract fees
-        fees = float(position_decimal * self.total_cost_rate)
-        net_target = target_profit - fees
-        
-        # Hit target
-        if unrealized_pnl >= net_target:
+        # Quick profit taking (much more aggressive)  
+        quick_target = fees + 20  # $20 net profit minimum
+        if unrealized_pnl >= quick_target and position_age_seconds >= 240:  # After 4 minutes
             return True, "profit_target"
         
-        # Quick exit at 1R after 60% of max time
-        if (position_age_seconds >= self.active_config['max_position_time'] * 0.6 and 
-            unrealized_pnl >= (risk_amount - fees) * 0.8):
+        # Main profit target
+        if unrealized_pnl >= gross_target:
             return True, "profit_target"
         
-        # Stop loss
-        stop_loss = -(risk_amount + fees)
-        if unrealized_pnl <= stop_loss:
-            return True, "stop_loss"
+        # Ultra-tight trailing stop logic
+        if unrealized_pnl > 0:
+            risk_unit = position_size_usdt * self.active_config['risk_percentage']  # 1.2% of position
+            profit_ratio = unrealized_pnl / risk_unit if risk_unit > 0 else 0
+            
+            # Activate trailing at 1R (REDUCED from 1.2R)
+            if profit_ratio >= self.trend_config['profit_lock_threshold']:
+                # Calculate trailing stop
+                trailing_distance = current_price * self.trend_config['trailing_stop_pct']  # 0.4%
+                
+                if side.lower() == 'buy':
+                    trailing_stop = current_price - trailing_distance
+                    if entry_price > trailing_stop * 0.998:  # Price dropped below trailing
+                        return True, "trailing_stop"
+                else:
+                    trailing_stop = current_price + trailing_distance  
+                    if entry_price < trailing_stop * 1.002:  # Price rose above trailing
+                        return True, "trailing_stop"
+        
+        # Time-based exits (faster for high frequency)
+        time_threshold_1 = self.active_config['max_position_time'] * 0.5  # 50% (6 minutes)
+        time_threshold_2 = self.active_config['max_position_time'] * 0.75  # 75% (9 minutes)
+        
+        if position_age_seconds >= time_threshold_2:
+            # Exit with small loss/profit after 9 minutes
+            if unrealized_pnl >= fees - 10:  # Break-even or small loss acceptable
+                return True, "timeout_no_profit"
+        elif position_age_seconds >= time_threshold_1:
+            # Take small profits after 6 minutes
+            if unrealized_pnl >= fees + 15:  # $15 net profit
+                return True, "profit_target"
         
         return False, "hold"
     
-    def get_order_strategy(self, signal_action: str, current_price: float, 
-                          confidence: float) -> Dict[str, Any]:
-        """LIMIT-FIRST strategy: Try limit order first, fallback to market"""
+    def calculate_trailing_stop(self, current_price: float, entry_price: float, side: str, 
+                               highest_profit: float) -> float:
+        """Calculate ultra-tight 0.4% trailing stop"""
+        if self.active_strategy != "TREND" or highest_profit <= 0:
+            return 0
         
-        # Higher confidence = more aggressive limit pricing
-        if confidence >= 80:
-            limit_offset_pct = 0.0005  # 0.05% offset for high confidence
-        elif confidence >= 70:
-            limit_offset_pct = 0.001   # 0.1% offset for medium confidence  
+        trail_distance = current_price * self.trend_config['trailing_stop_pct']  # 0.4%
+        
+        if side.lower() == 'buy':
+            return current_price - trail_distance
         else:
-            limit_offset_pct = 0.0015  # 0.15% offset for lower confidence
-        
-        if signal_action == 'BUY':
-            limit_price = current_price * (1 - limit_offset_pct)
-        else:
-            limit_price = current_price * (1 + limit_offset_pct)
-        
-        return {
-            'primary_order': {
-                'type': 'limit',
-                'price': limit_price,
-                'time_in_force': 'IOC',  # Immediate-or-Cancel
-                'fee_rate': float(self.maker_fee_rate),
-                'expected_fill_pct': 30  # 30% expected fill rate
-            },
-            'fallback_order': {
-                'type': 'market',
-                'time_in_force': 'IOC',
-                'fee_rate': float(self.taker_fee_rate),
-                'trigger': 'if_primary_unfilled'
-            },
-            'blended_expected_fee': float(self.blended_fee_rate),
-            'strategy': 'limit_first_ioc_fallback'
-        }
-    
-    def get_leverage(self) -> int:
-        """Get leverage setting"""
-        return self.active_config['leverage']
-    
-    def get_max_position_time(self) -> int:
-        """Get maximum position hold time"""
-        return self.active_config['max_position_time']
-    
-    def get_active_config(self) -> Dict[str, Any]:
-        """Get complete configuration with corrected break-even analysis"""
-        
-        example_position = 5000  # $5k example
-        fee_analysis = self.get_fee_analysis(example_position)
-        
-        return {
-            'strategy': self.active_strategy,
-            'corrected_breakeven': {
-                'range_strategy': f"{self.range_breakeven_rate*100:.2f}%",
-                'trend_strategy': f"{self.trend_breakeven_rate*100:.2f}%",
-                'current_strategy': f"{self.get_current_breakeven_rate()*100:.2f}%",
-                'formula': 'Win_Rate = (Risk + Fee) / (Risk + Reward)',
-                'old_formula_error': 'Previous formula was missing proper fee integration'
-            },
-            'fee_optimization': {
-                'maker_fee': f"{float(self.maker_fee_rate)*100:.3f}%",
-                'taker_fee': f"{float(self.taker_fee_rate)*100:.3f}%", 
-                'blended_fee': f"{float(self.blended_fee_rate)*100:.3f}%",
-                'maker_fill_assumption': f"{float(self.maker_fill_ratio)*100:.0f}%",
-                'total_cost_with_slippage': f"{float(self.total_cost_rate)*100:.3f}%"
-            },
-            'dynamic_sizing': {
-                'fee_target_percentage': f"{float(self.active_config['fee_target_pct'])*100:.1f}%",
-                'min_position': f"${self.active_config['min_position_usdt']}",
-                'max_position': f"${self.active_config['max_position_usdt']}",
-                'example_analysis': fee_analysis
-            },
-            'trailing_stops': {
-                'enabled': self.active_strategy == "TREND",
-                'breakeven_threshold': '1.2R',
-                'trailing_method': '0.5 ATR or 0.5% fallback',
-                'drawdown_trigger': '20% from peak profit'
-            }
-        }
+            return current_price + trail_distance
     
     def adapt_to_market_condition(self, market_condition: str, volatility: str):
-        """Adapt config based on market conditions"""
+        """ULTRA-AGGRESSIVE: Adapt to market conditions while maintaining high frequency"""
         base_config = (self.range_config if self.active_strategy == "RANGE" 
                       else self.trend_config).copy()
         
         self.active_config = base_config.copy()
         
-        # Volatility adjustments (keep position sizes fixed for fee efficiency)
+        # Volatility adjustments (more conservative than before)
         if volatility == "HIGH_VOL":
-            # Tighter stops and shorter holds in high volatility
-            self.active_config['max_position_time'] = int(base_config['max_position_time'] * 0.7)
+            # Reduce position sizes and tighten timing in high volatility
+            self.active_config['target_position_usdt'] = int(base_config['target_position_usdt'] * 0.75)
+            self.active_config['max_position_time'] = int(base_config['max_position_time'] * 0.8)
         elif volatility == "LOW_VOL":
-            # Longer holds in low volatility
+            # Slightly increase size in low volatility but maintain speed
+            self.active_config['target_position_usdt'] = int(base_config['target_position_usdt'] * 1.1)
             self.active_config['max_position_time'] = int(base_config['max_position_time'] * 1.2)
+        
+        # Market condition fine-tuning
+        if market_condition == "STRONG_TREND" and self.active_strategy == "TREND":
+            # Allow slightly larger positions in strong trends
+            self.active_config['target_position_usdt'] = int(base_config['target_position_usdt'] * 1.15)
+        elif market_condition == "STRONG_RANGE" and self.active_strategy == "RANGE":
+            # Optimize for strong ranging markets
+            self.active_config['target_position_usdt'] = int(base_config['target_position_usdt'] * 1.1)
+    
+    def get_leverage(self) -> int:
+        return self.active_config['leverage']
+    
+    def get_max_position_time(self) -> int:
+        return self.active_config['max_position_time']
+    
+    def validate_fee_efficiency(self, position_size_usdt: float, expected_profit: float) -> bool:
+        """Validate fee efficiency for ultra-aggressive system"""
+        break_even_fees = self.get_break_even_pnl(position_size_usdt)
+        min_profit_target = self.get_min_profitable_target(position_size_usdt)
+        
+        # More lenient efficiency check for high frequency
+        efficiency_ratio = expected_profit / break_even_fees if break_even_fees > 0 else 0
+        min_efficiency = 10 if self.active_strategy == "RANGE" else 12  # REDUCED ratios
+        
+        return efficiency_ratio >= min_efficiency and expected_profit >= min_profit_target
+    
+    def get_active_config(self) -> Dict[str, Any]:
+        """Get complete ultra-aggressive configuration"""
+        position_size = self.active_config['target_position_usdt']
+        fees = self.get_break_even_pnl(position_size)
+        
+        if self.active_strategy == "RANGE":
+            gross_target = self.active_config['gross_profit_target']
+            net_target = gross_target - fees
+            sizing_info = {
+                'method': 'Ultra-Aggressive Dynamic Sizing',
+                'target_size_usdt': position_size,
+                'size_range': f"${self.active_config['min_position_usdt']}-${self.active_config['max_position_usdt']}",
+                'gross_target': f"${gross_target}",
+                'estimated_fees': f"${fees:.2f}",
+                'estimated_net': f"${net_target:.2f}",
+                'reward_ratio': f"1:{self.active_config['reward_ratio']}",
+                'max_hold_time': f"{self.active_config['max_position_time']}s"
+            }
+        else:
+            risk_amount = position_size * self.active_config['risk_percentage']
+            target_profit = risk_amount * self.active_config['reward_ratio']
+            sizing_info = {
+                'method': 'Ultra-Aggressive Dynamic Sizing',
+                'target_size_usdt': position_size,
+                'size_range': f"${self.active_config['min_position_usdt']}-${self.active_config['max_position_usdt']}",
+                'risk_amount': f"${risk_amount:.2f}",
+                'target_profit': f"${target_profit:.2f}",
+                'estimated_fees': f"${fees:.2f}",
+                'reward_ratio': f"1:{self.active_config['reward_ratio']}",
+                'trailing_stop': f"{self.trend_config['trailing_stop_pct']*100:.1f}%",
+                'max_hold_time': f"{self.active_config['max_position_time']}s"
+            }
+        
+        return {
+            'strategy': self.active_strategy,
+            'config': self.active_config.copy(),
+            'fee_model': {
+                'blended_fee_rate': f"{self.blended_fee*100:.4f}%",
+                'total_cost_rate': f"{self.fee_rate*100:.4f}%",
+                'maker_fill_ratio': f"{self.maker_fill_ratio*100:.0f}%",
+                'expected_fee_reduction': "31%"
+            },
+            'position_sizing': sizing_info,
+            'ultra_aggressive_features': {
+                'emergency_stop': f"{self.active_config['emergency_stop_pct']*100:.1f}%",
+                'max_hold_time': f"{self.active_config['max_position_time']}s",
+                'leverage': f"{self.active_config['leverage']}x",
+                'fee_efficiency_min': "10-12x ratios",
+                'frequency_optimization': 'High-frequency sizing (reduced positions)',
+                'break_even_formula': 'Position_Size × 0.000615',
+                'profit_targets': f"Range: ${self.range_config['net_profit_target']}, Trend: ${self.trend_config['net_profit_target']}"
+            }
+        }

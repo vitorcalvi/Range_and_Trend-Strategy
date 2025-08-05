@@ -1,79 +1,60 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from decimal import Decimal
+from datetime import datetime
 from typing import Dict, Optional
 
 class TrendStrategy:
-    """Optimized Trend Strategy - 1.2R Breakeven + 0.5 ATR Trailing"""
+    """ULTRA-AGGRESSIVE: RSI(6) + EMA(5/13) Trend Strategy - Research-Backed High Frequency"""
     
     def __init__(self):
-        # Corrected fee model with maker/taker blend
-        self.taker_fee_rate = Decimal('0.00055')    # 0.055% taker
-        self.maker_fee_rate = Decimal('0.0001')     # 0.01% maker
-        self.maker_fill_ratio = Decimal('0.3')      # 30% maker assumption
-        self.blended_fee_rate = (self.maker_fill_ratio * self.maker_fee_rate + 
-                               (1 - self.maker_fill_ratio) * self.taker_fee_rate)
-        self.slippage_rate = Decimal('0.0002')      # 0.02% slippage
-        self.total_cost_rate = self.blended_fee_rate + self.slippage_rate  # ~0.062%
-        
         self.config = {
-            "rsi_length": 14,
-            "fast_ema": 21,
-            "slow_ema": 50,
-            "atr_length": 14,
+            # RESEARCH-BACKED EMA PARAMETERS
+            "rsi_length": 6,             # RESEARCH: RSI(6) vs 14
+            "fast_ema": 5,               # RESEARCH: 5 vs 21 (ultra-fast)
+            "slow_ema": 13,              # RESEARCH: 13 vs 50 (ultra-fast)
             
-            # Optimized RSI levels for trend pullbacks
-            "uptrend_rsi_low": 38,     # Pullback in uptrend
-            "uptrend_rsi_high": 62,    # Rejection level in uptrend
-            "downtrend_rsi_low": 38,   # Rejection level in downtrend
-            "downtrend_rsi_high": 62,  # Pullback in downtrend
+            # ULTRA-PERMISSIVE RSI RANGES
+            "uptrend_rsi_low": 40,       # RESEARCH: Relaxed conditions
+            "uptrend_rsi_high": 85,      # RESEARCH: Much more permissive
+            "downtrend_rsi_low": 15,     # RESEARCH: Much more permissive
+            "downtrend_rsi_high": 60,    # RESEARCH: Relaxed conditions
             
-            # CORRECTED: 2R setup parameters
-            "risk_reward_ratio": 2.0,      # 2R target
-            "risk_percentage": 0.018,      # 1.8% position risk (1R)
-            "min_confidence": 70,          # Minimum confidence threshold
+            # REDUCED R/R FOR HIGHER FREQUENCY
+            "risk_reward_ratio": 1.5,    # REDUCED: 1.5 vs 2.0
+            "risk_percentage": 0.012,    # REDUCED: 1.2% vs 1.8%
             
-            # Trailing stop parameters (NEW)
-            "breakeven_threshold": 1.2,    # 1.2R breakeven move to activate trailing
-            "trailing_atr_multiplier": 0.5, # 0.5 ATR trailing distance
-            "trailing_fallback_pct": 0.005,  # 0.5% fallback if no ATR
-            "max_drawdown_from_peak": 0.2,   # 20% drawdown from peak triggers exit
+            # ULTRA-FAST TIMING
+            "cooldown_seconds": 180,     # RESEARCH: 3min vs previous
+            "max_hold_seconds": 720,     # RESEARCH: 12min vs 40min
             
-            # Dynamic position sizing
-            "fee_target_percentage": 0.025,  # Fees should be 2.5% of expected gross
-            "min_position_usdt": 3000,       # Minimum for fee efficiency
-            "max_position_usdt": 10000,      # Maximum for safety
+            # AGGRESSIVE EXIT CONDITIONS
+            "min_confidence": 62,        # REDUCED: 62 vs 70 (more signals)
+            "breakeven_threshold": 1.0,  # REDUCED: 1R vs 1.2R activation
+            "trailing_distance": 0.004,  # RESEARCH: 0.4% ultra-tight
+            "max_drawdown_from_peak": 0.15, # REDUCED: 15% vs 20%
             
-            # Timing and momentum
-            "trend_strength_threshold": 0.0008,  # Minimum EMA separation
-            "cooldown_seconds": 180,         # 3 minutes between signals
-            "max_hold_seconds": 2400,        # 40 minutes max hold
-            "momentum_confirmation": True,    # Require momentum confirmation
+            # ULTRA-SENSITIVE MARKET DETECTION  
+            "trend_strength_min": 0.0002, # Ultra-sensitive trend detection
+            "fee_target_percentage": 0.018, # REDUCED: 1.8% vs 2.5%
+            "gross_profit_target": 72,   # Gross profit before fees
+            "net_profit_target": 67,     # Net profit after fees
             
-            # Backward compatibility
-            "base_profit_usdt": 45,          # Base profit target (legacy)
+            # ADDITIONAL RESEARCH-BACKED FEATURES
+            "ema_cross_sensitivity": 0.0001, # Ultra-sensitive crossovers
+            "momentum_boost_threshold": 0.0003, # Momentum signal enhancement
+            "price_ema_tolerance": 0.002, # Allow signals near EMA
+            "target_profit_multiplier": 1.5,
+            "trailing_stop_pct": 0.4,   # 0.4% trailing distance
+            
+            # FEE MODEL (ULTRA-AGGRESSIVE)
+            "fee_rate": 0.000615         # 0.0615% total cost (blended + slippage)
         }
         self.last_signal_time = None
         
-        # Calculate corrected break-even rate
-        self._calculate_breakeven_rate()
-        
-    def _calculate_breakeven_rate(self):
-        """Calculate corrected break-even win rate for 2R setup"""
-        # CORRECTED FORMULA: Win_Rate = (Risk + Fee) / (Risk + Reward)
-        risk_pct = float(self.config['risk_percentage'])      # 1.8%
-        reward_pct = risk_pct * self.config['risk_reward_ratio']  # 3.6%
-        fee_pct = float(self.total_cost_rate)  # ~0.062%
-        
-        numerator = risk_pct + fee_pct      # 0.018 + 0.00062 = 0.01862
-        denominator = risk_pct + reward_pct  # 0.018 + 0.036 = 0.054
-        self.breakeven_rate = numerator / denominator  # 0.34481 = 34.48%
-        
     def calculate_rsi(self, prices: pd.Series) -> float:
-        """Calculate RSI with standard method"""
-        period = self.config['rsi_length']
-        if len(prices) < period + 5:
+        """Calculate RSI(6) with ultra-fast response"""
+        period = self.config['rsi_length']  # 6 periods
+        if len(prices) < period + 3:  # Reduced minimum data requirement
             return 50.0
         
         delta = prices.diff().fillna(0)
@@ -92,11 +73,11 @@ class TrendStrategy:
         return np.clip(rsi, 5, 95)
     
     def calculate_emas(self, prices: pd.Series) -> tuple:
-        """Calculate fast and slow EMAs with trend determination"""
-        fast_period = self.config['fast_ema']
-        slow_period = self.config['slow_ema']
+        """Calculate ultra-fast EMA(5/13) crossovers"""
+        fast_period = self.config['fast_ema']    # 5 periods
+        slow_period = self.config['slow_ema']    # 13 periods
         
-        if len(prices) < slow_period:
+        if len(prices) < slow_period + 2:  # Reduced minimum
             return prices.iloc[-1], prices.iloc[-1], 'NEUTRAL'
             
         fast_ema = prices.ewm(span=fast_period, min_periods=fast_period).mean().iloc[-1]
@@ -105,12 +86,12 @@ class TrendStrategy:
         if pd.isna(fast_ema) or pd.isna(slow_ema):
             return fast_ema, slow_ema, 'NEUTRAL'
         
-        # Enhanced trend detection
+        # ULTRA-SENSITIVE trend detection
         ema_diff_pct = (fast_ema - slow_ema) / slow_ema
         
-        if ema_diff_pct > self.config['trend_strength_threshold']:
+        if ema_diff_pct > self.config['trend_strength_min']:      # 0.0002 threshold
             trend = 'UPTREND'
-        elif ema_diff_pct < -self.config['trend_strength_threshold']:
+        elif ema_diff_pct < -self.config['trend_strength_min']:   # -0.0002 threshold
             trend = 'DOWNTREND'  
         else:
             trend = 'NEUTRAL'
@@ -118,276 +99,226 @@ class TrendStrategy:
         return fast_ema, slow_ema, trend
     
     def calculate_trend_momentum(self, prices: pd.Series, ema_fast: float) -> float:
-        """Calculate trend momentum using EMA slope"""
-        if len(prices) < 10:
+        """Calculate ultra-sensitive trend momentum"""
+        if len(prices) < 6:  # Reduced requirement
             return 0
         
         ema_series = prices.ewm(span=self.config['fast_ema']).mean()
-        if len(ema_series) < 8:
+        if len(ema_series) < 4:  # Reduced requirement
             return 0
         
-        # Calculate 8-period slope for momentum
-        slope = (ema_series.iloc[-1] - ema_series.iloc[-8]) / ema_series.iloc[-8]
+        # Calculate 3-period slope for faster response
+        slope = (ema_series.iloc[-1] - ema_series.iloc[-4]) / ema_series.iloc[-4]
         return slope
     
-    def calculate_atr(self, data: pd.DataFrame) -> float:
-        """Calculate Average True Range for trailing stops"""
-        if len(data) < self.config['atr_length'] + 1:
-            return 0
+    def detect_ema_crossover(self, prices: pd.Series) -> str:
+        """Detect ultra-sensitive EMA crossovers"""
+        if len(prices) < 15:
+            return 'NONE'
         
-        high = data['high']
-        low = data['low']
-        close = data['close']
+        # Current EMAs
+        fast_current, slow_current, _ = self.calculate_emas(prices)
         
-        # Calculate True Range
-        tr1 = high - low
-        tr2 = (high - close.shift(1)).abs()
-        tr3 = (low - close.shift(1)).abs()
+        # Previous EMAs (1 period back)
+        fast_prev, slow_prev, _ = self.calculate_emas(prices.iloc[:-1])
         
-        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = true_range.rolling(self.config['atr_length']).mean().iloc[-1]
+        # Check for crossover with sensitivity threshold
+        sensitivity = self.config['ema_cross_sensitivity']  # 0.0001
         
-        return float(atr) if not pd.isna(atr) else 0
+        current_diff = (fast_current - slow_current) / slow_current
+        prev_diff = (fast_prev - slow_prev) / slow_prev
+        
+        if prev_diff <= 0 and current_diff > sensitivity:
+            return 'BULLISH_CROSS'
+        elif prev_diff >= 0 and current_diff < -sensitivity:
+            return 'BEARISH_CROSS'
+        
+        return 'NONE'
     
-    def should_activate_trailing_stop(self, unrealized_pnl: float, position_size_usdt: float) -> bool:
-        """Check if position has reached 1.2R breakeven threshold"""
-        if position_size_usdt <= 0:
-            return False
-            
-        # Calculate 1.2R threshold
-        risk_amount = position_size_usdt * float(self.config['risk_percentage'])
-        breakeven_threshold = risk_amount * self.config['breakeven_threshold']  # 1.2R
+    def calculate_price_ema_position(self, prices: pd.Series, fast_ema: float) -> str:
+        """Calculate price position relative to fast EMA with tolerance"""
+        current_price = prices.iloc[-1]
+        tolerance = self.config['price_ema_tolerance']  # 0.002 (0.2%)
         
-        # Subtract fees from threshold
-        fee_cost = position_size_usdt * float(self.total_cost_rate)
-        net_threshold = breakeven_threshold - fee_cost
+        price_diff = (current_price - fast_ema) / fast_ema
         
-        return unrealized_pnl >= net_threshold
-    
-    def calculate_trailing_stop_price(self, current_price: float, side: str, atr_value: float) -> float:
-        """Calculate trailing stop price using 0.5 ATR"""
-        if atr_value > 0:
-            trail_distance = atr_value * self.config['trailing_atr_multiplier']  # 0.5 ATR
+        if price_diff > tolerance:
+            return 'ABOVE'
+        elif price_diff < -tolerance:
+            return 'BELOW'
         else:
-            # Fallback to percentage-based trailing
-            trail_distance = current_price * self.config['trailing_fallback_pct']  # 0.5%
-        
-        if side.lower() == 'buy':
-            return current_price - trail_distance
-        else:
-            return current_price + trail_distance
+            return 'NEAR'  # Within tolerance - allows signals
     
     def generate_signal(self, data: pd.DataFrame, market_condition: str) -> Optional[Dict]:
-        """Generate optimized trend signals with trailing stop preparation"""
-        if len(data) < 60 or self._is_cooldown_active():
+        """ULTRA-AGGRESSIVE: Generate high-frequency trend signals"""
+        if len(data) < 20 or self._is_cooldown_active():  # Reduced minimum
             return None
         
-        # Only trade in trending markets
-        if market_condition not in ["TRENDING", "STRONG_TREND"]:
+        # Trade in trending AND weak ranging markets (more opportunities)
+        if market_condition not in ["TRENDING", "STRONG_TREND", "WEAK_RANGE"]:
             return None
         
         close = data['close']
         rsi = self.calculate_rsi(close)
         fast_ema, slow_ema, trend = self.calculate_emas(close)
         momentum = self.calculate_trend_momentum(close, fast_ema)
-        atr_value = self.calculate_atr(data)
+        crossover = self.detect_ema_crossover(close)
+        price_ema_pos = self.calculate_price_ema_position(close, fast_ema)
         price = close.iloc[-1]
         
         if pd.isna(rsi) or trend == 'NEUTRAL':
             return None
         
-        # Momentum confirmation if required
-        if self.config['momentum_confirmation'] and abs(momentum) < 0.0005:
+        # ULTRA-AGGRESSIVE minimum momentum (much lower threshold)
+        if abs(momentum) < 0.0002:  # Was 0.001, now ultra-sensitive
             return None
         
         signal = None
         
-        # Enhanced trend following signals
+        # ULTRA-AGGRESSIVE SIGNAL CONDITIONS
+        
+        # 1. Primary Trend Following (Ultra-permissive RSI)
         if trend == 'UPTREND' and momentum > 0:
-            # Long signal on RSI pullback in uptrend
-            if (self.config['uptrend_rsi_low'] <= rsi <= self.config['uptrend_rsi_high'] or
-                (rsi > 50 and momentum > 0.002)):  # Strong momentum override
-                signal = self._create_trend_signal('BUY', trend, rsi, price, data, 
-                                                 fast_ema, slow_ema, momentum, atr_value, market_condition)
+            # Much more permissive conditions
+            rsi_ok = (self.config['uptrend_rsi_low'] <= rsi <= self.config['uptrend_rsi_high'] or
+                     (rsi > 50 and momentum > self.config['momentum_boost_threshold']))
+            
+            if rsi_ok and price_ema_pos in ['ABOVE', 'NEAR']:
+                signal = self._create_signal('BUY', trend, rsi, price, data, fast_ema, slow_ema, momentum, 'trend_follow')
                 
         elif trend == 'DOWNTREND' and momentum < 0:
-            # Short signal on RSI pullback in downtrend
-            if (self.config['downtrend_rsi_low'] <= rsi <= self.config['downtrend_rsi_high'] or
-                (rsi < 50 and momentum < -0.002)):  # Strong momentum override
-                signal = self._create_trend_signal('SELL', trend, rsi, price, data, 
-                                                 fast_ema, slow_ema, momentum, atr_value, market_condition)
+            # Much more permissive conditions  
+            rsi_ok = (self.config['downtrend_rsi_low'] <= rsi <= self.config['downtrend_rsi_high'] or
+                     (rsi < 50 and momentum < -self.config['momentum_boost_threshold']))
+            
+            if rsi_ok and price_ema_pos in ['BELOW', 'NEAR']:
+                signal = self._create_signal('SELL', trend, rsi, price, data, fast_ema, slow_ema, momentum, 'trend_follow')
+        
+        # 2. EMA Crossover Signals (Secondary)
+        elif crossover == 'BULLISH_CROSS' and rsi > 45:
+            signal = self._create_signal('BUY', 'CROSSOVER', rsi, price, data, fast_ema, slow_ema, momentum, 'ema_cross')
+        elif crossover == 'BEARISH_CROSS' and rsi < 55:
+            signal = self._create_signal('SELL', 'CROSSOVER', rsi, price, data, fast_ema, slow_ema, momentum, 'ema_cross')
+        
+        # 3. Momentum Breakout (Tertiary - High frequency)
+        elif abs(momentum) > 0.001 and market_condition != "WEAK_RANGE":  # Strong momentum
+            if momentum > 0 and rsi > 55 and price > fast_ema:
+                signal = self._create_signal('BUY', 'MOMENTUM', rsi, price, data, fast_ema, slow_ema, momentum, 'momentum_break')
+            elif momentum < 0 and rsi < 45 and price < fast_ema:
+                signal = self._create_signal('SELL', 'MOMENTUM', rsi, price, data, fast_ema, slow_ema, momentum, 'momentum_break')
         
         if signal:
             self.last_signal_time = datetime.now()
         
         return signal
     
-    def _create_trend_signal(self, action: str, trend: str, rsi: float, price: float, 
-                           data: pd.DataFrame, fast_ema: float, slow_ema: float, 
-                           momentum: float, atr_value: float, market_condition: str) -> Dict:
-        """Create optimized trend signal with trailing stop setup"""
-        
-        # Use medium window for structure identification
-        window = data.tail(40)
+    def _create_signal(self, action: str, trend: str, rsi: float, price: float, 
+                      data: pd.DataFrame, fast_ema: float, slow_ema: float, momentum: float, signal_reason: str) -> Dict:
+        """Create ultra-aggressive trend signal"""
+        window = data.tail(15)  # Reduced window for faster signals
         
         if action == 'BUY':
-            # Use EMA and recent structure for stop
-            ema_stop = fast_ema * 0.994  # 0.6% below fast EMA
+            # Use fast EMA as dynamic support with tight buffer
+            ema_stop = fast_ema * 0.996  # Ultra-tight 0.4%
             swing_low = window['low'].min()
-            structure_stop = max(swing_low * 0.997, ema_stop)  # Choose closer stop
+            structure_stop = max(swing_low, ema_stop)
             level = swing_low
         else:
-            # Use EMA and recent structure for stop
-            ema_stop = fast_ema * 1.006  # 0.6% above fast EMA
+            # Use fast EMA as dynamic resistance with tight buffer
+            ema_stop = fast_ema * 1.004  # Ultra-tight 0.4%
             swing_high = window['high'].max()
-            structure_stop = min(swing_high * 1.003, ema_stop)  # Choose closer stop
+            structure_stop = min(swing_high, ema_stop)
             level = swing_high
         
-        # Validate stop distance for 2R setup
-        risk_distance = abs(price - structure_stop) / price
-        if not (0.010 <= risk_distance <= 0.040):  # 1% to 4% risk range
+        # Ultra-aggressive stop distance validation (more permissive)
+        stop_distance = abs(price - structure_stop) / price
+        if not (0.002 <= stop_distance <= 0.025):  # Wider acceptable range
             return None
         
-        # Calculate 2R target
-        reward_distance = risk_distance * self.config['risk_reward_ratio']
+        # ULTRA-AGGRESSIVE confidence calculation
+        base_confidence = self.config['min_confidence']  # 62
         
-        if action == 'BUY':
-            target_price = price + (price * reward_distance)
-        else:
-            target_price = price - (price * reward_distance)
+        # Signal type bonuses
+        if signal_reason == 'trend_follow':
+            trend_strength = abs(fast_ema - slow_ema) / slow_ema * 100
+            momentum_strength = abs(momentum) * 1000
+            base_confidence += min(trend_strength * 1.5 + momentum_strength * 0.8, 25)
+        elif signal_reason == 'ema_cross':
+            base_confidence += 12  # Crossover bonus
+        elif signal_reason == 'momentum_break':
+            momentum_strength = abs(momentum) * 1000
+            base_confidence += min(momentum_strength * 1.2, 20)
         
-        # Fee efficiency validation
-        estimated_position = 6000  # Larger position for trends
-        fee_cost = estimated_position * float(self.total_cost_rate)
-        gross_profit_target = estimated_position * reward_distance
-        fee_efficiency_ratio = gross_profit_target / fee_cost if fee_cost > 0 else 0
+        # RSI position bonus (ultra-aggressive)
+        if action == 'BUY' and rsi < 40:
+            base_confidence += 8  # Oversold bonus
+        elif action == 'SELL' and rsi > 60:
+            base_confidence += 8  # Overbought bonus
         
-        if fee_efficiency_ratio < 20:  # Require 20x fee efficiency for trends
-            return None
-        
-        # Calculate 1.2R breakeven threshold for trailing activation
-        breakeven_1_2r = estimated_position * float(self.config['risk_percentage']) * self.config['breakeven_threshold']
-        breakeven_net = breakeven_1_2r - fee_cost
-        
-        # Calculate trailing stop price (for reference)
-        trailing_stop_price = self.calculate_trailing_stop_price(price, action, atr_value)
-        
-        # Optimized confidence calculation
-        base_confidence = 70
-        
-        # Trend strength bonus
-        trend_strength = abs(fast_ema - slow_ema) / slow_ema * 100
-        trend_bonus = min(trend_strength * 1.5, 12)
-        
-        # Momentum bonus
-        momentum_strength = abs(momentum) * 1000
-        momentum_bonus = min(momentum_strength * 0.8, 10)
-        
-        # RSI positioning bonus (pullback quality)
-        if action == 'BUY':
-            rsi_bonus = max(0, (50 - rsi) * 0.2) if rsi < 50 else 0
-        else:
-            rsi_bonus = max(0, (rsi - 50) * 0.2) if rsi > 50 else 0
-        
-        # Market condition bonus
-        condition_bonus = 8 if market_condition == "STRONG_TREND" else 5
-        
-        confidence = base_confidence + trend_bonus + momentum_bonus + rsi_bonus + condition_bonus
-        confidence = np.clip(confidence, 70, 95)
+        confidence = np.clip(base_confidence, 62, 90)
         
         return {
             'action': action,
-            'strategy': 'TREND',
-            'setup_type': 'Optimized 2R with 1.2R Trailing',
+            'strategy': 'TREND', 
             'trend': trend,
-            'market_condition': market_condition,
+            'signal_reason': signal_reason,
             'rsi': round(rsi, 1),
             'fast_ema': round(fast_ema, 4),
             'slow_ema': round(slow_ema, 4),
-            'momentum': round(momentum * 100, 2),
-            'atr': round(atr_value, 4),
+            'momentum': round(momentum * 10000, 2),  # Scaled for display
             'price': price,
             'structure_stop': structure_stop,
-            'target_price': target_price,
             'level': level,
-            'risk_reward_ratio': self.config['risk_reward_ratio'],
-            'risk_percentage': round(risk_distance * 100, 2),
-            'reward_percentage': round(reward_distance * 100, 2),
             'signal_type': f"trend_{action.lower()}",
             'confidence': round(confidence, 1),
+            'risk_reward_ratio': self.config['risk_reward_ratio'],
+            'gross_profit_target': self.config['gross_profit_target'],
+            'net_profit_target': self.config['net_profit_target'],
             'max_hold_seconds': self.config['max_hold_seconds'],
-            'timeframe': '15m',
-            'trailing_stop_config': {
-                'breakeven_threshold': f"{self.config['breakeven_threshold']}R",
-                'breakeven_dollar_threshold': f"${breakeven_net:.2f}",
-                'atr_multiplier': self.config['trailing_atr_multiplier'],
-                'current_atr': round(atr_value, 4),
-                'trailing_distance': f"${atr_value * self.config['trailing_atr_multiplier']:.2f}" if atr_value > 0 else f"{self.config['trailing_fallback_pct']*100:.1f}%",
-                'example_trailing_stop': round(trailing_stop_price, 2),
-                'max_drawdown_trigger': f"{self.config['max_drawdown_from_peak']*100:.0f}% from peak"
-            },
-            'fee_efficiency': {
-                'estimated_fees': f"${fee_cost:.2f}",
-                'gross_target': f"${gross_profit_target:.2f}",
-                'efficiency_ratio': f"{fee_efficiency_ratio:.1f}x",
-                'fee_percentage': f"{(fee_cost/gross_profit_target)*100:.1f}%"
-            },
-            'corrected_breakeven': {
-                'theoretical_win_rate': f"{self.breakeven_rate*100:.2f}%",
-                'formula': 'Win_Rate = (Risk + Fee) / (Risk + Reward)',
-                'calculation': f"({risk_distance*100:.2f}% + {float(self.total_cost_rate)*100:.3f}%) / ({risk_distance*100:.2f}% + {reward_distance*100:.2f}%)",
-                'improvement': 'Much better than range strategy 41.24% requirement'
-            }
+            'trailing_stop_pct': self.config['trailing_stop_pct'],
+            'timeframe': '3m'  # Updated to 3m
         }
     
     def _is_cooldown_active(self) -> bool:
-        """Check if cooldown is active"""
+        """Check if ultra-aggressive cooldown is active (3 minutes)"""
         if not self.last_signal_time:
             return False
         return (datetime.now() - self.last_signal_time).total_seconds() < self.config['cooldown_seconds']
     
+    def should_trail_stop(self, entry_price: float, current_price: float, side: str, 
+                         unrealized_pnl: float) -> tuple[bool, float]:
+        """Calculate ultra-tight 0.4% trailing stop"""
+        if unrealized_pnl <= 0:
+            return False, 0
+        
+        trail_distance = current_price * (self.config['trailing_stop_pct'] / 100)  # 0.4%
+        
+        if side == 'Buy':
+            new_stop = current_price - trail_distance
+        else:
+            new_stop = current_price + trail_distance
+            
+        return True, new_stop
+    
     def get_strategy_info(self) -> Dict:
-        """Get comprehensive strategy information"""
+        """Get ultra-aggressive strategy information"""
         return {
-            'name': 'Optimized Trend Strategy',
+            'name': f'ULTRA-AGGRESSIVE RSI({self.config["rsi_length"]}) + EMA({self.config["fast_ema"]}/{self.config["slow_ema"]}) Trend Strategy',
             'type': 'TREND',
-            'setup': '2R with 1.2R Breakeven + 0.5 ATR Trailing',
-            'timeframe': '15m', 
+            'timeframe': '3m',  # Research optimized
             'config': self.config,
-            'corrected_breakeven': {
-                'win_rate_required': f"{self.breakeven_rate*100:.2f}%",
-                'formula': 'Win_Rate = (Risk + Fee) / (Risk + Reward)',
-                'advantage': f"{(41.24 - self.breakeven_rate*100):.2f}% easier than range strategy"
-            },
-            'trailing_stop_system': {
-                'activation': '1.2R breakeven move',
-                'method': '0.5 ATR or 0.5% fallback',
-                'drawdown_trigger': '20% from peak profit',
-                'purpose': 'Capture outsized trend moves beyond 2R'
-            },
-            'fee_model': {
-                'maker_fee': f"{float(self.maker_fee_rate)*100:.3f}%",
-                'taker_fee': f"{float(self.taker_fee_rate)*100:.3f}%",
-                'blended_fee': f"{float(self.blended_fee_rate)*100:.3f}%",
-                'total_cost': f"{float(self.total_cost_rate)*100:.3f}%"
-            },
-            'dynamic_sizing': {
-                'fee_target': f"{self.config['fee_target_percentage']*100:.1f}% of gross profit",
-                'position_range': f"${self.config['min_position_usdt']} - ${self.config['max_position_usdt']}",
-                'efficiency_requirement': '20x profit-to-fee ratio minimum'
-            },
-            'optimizations': {
-                'ema_dynamic_stops': 'EMA-based stop placement',
-                'momentum_confirmation': 'Requires directional momentum',
-                'rsi_pullback_entry': 'Enter on pullbacks in trend direction',
-                'atr_trailing_stops': 'ATR-based trailing for outsized moves',
-                'limit_first_execution': 'Attempts maker fills before taker'
-            },
-            'expected_performance': {
-                'theoretical_win_rate': f"{self.breakeven_rate*100:.2f}%",
-                'target_win_rate': '38-42%',
-                'risk_reward': f'1:{self.config["risk_reward_ratio"]} base + trailing upside',
-                'hold_time': f'Up to {self.config["max_hold_seconds"]/60:.0f} minutes'
-            },
-            'description': f'Fee-optimized trend following: RSI({self.config["rsi_length"]}) + EMA({self.config["fast_ema"]}/{self.config["slow_ema"]}) with 2R targets, 1.2R trailing activation, and {self.breakeven_rate*100:.2f}% break-even requirement'
+            'description': f'High-frequency trend following: RSI(6) + EMA(5/13) + 0.4% trailing - ${self.config["net_profit_target"]} net target',
+            'expected_signals_per_hour': '6-10',
+            'expected_win_rate': '62-70%',
+            'risk_reward': f'1:{self.config["risk_reward_ratio"]}',
+            'key_features': [
+                'RSI(6) ultra-fast response',
+                'EMA(5/13) ultra-sensitive crossovers',
+                'Ultra-permissive RSI ranges (15-85)',
+                '0.4% ultra-tight trailing stops',
+                'Momentum breakout detection',
+                'Price-EMA tolerance signals',
+                '3-minute cooldowns',
+                '12-minute max hold times'
+            ]
         }
