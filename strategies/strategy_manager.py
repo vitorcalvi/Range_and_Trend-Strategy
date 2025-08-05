@@ -1,21 +1,20 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Tuple, Any
 
 class MarketConditionDetector:
-    """FIXED: Simplified and more reliable market condition detection"""
+    """Market condition detection with improved ADX"""
     
     def __init__(self):
         self.adx_period = 14
         self.bb_period = 20
         
     def calculate_adx(self, high: pd.Series, low: pd.Series, close: pd.Series) -> float:
-        """FIXED: Simplified ADX calculation"""
+        """Simplified ADX calculation"""
         if len(close) < 20:
-            return 20.0  # Default to ranging
+            return 20.0
         
-        # Use last 30 periods for calculation (was 50, too much)
         h = high.iloc[-30:]
         l = low.iloc[-30:]
         c = close.iloc[-30:]
@@ -23,7 +22,6 @@ class MarketConditionDetector:
         tr_list, dm_plus_list, dm_minus_list = [], [], []
         
         for i in range(1, len(h)):
-            # True Range
             tr_val = max(
                 h.iloc[i] - l.iloc[i],
                 abs(h.iloc[i] - c.iloc[i-1]),
@@ -31,7 +29,6 @@ class MarketConditionDetector:
             )
             tr_list.append(tr_val)
             
-            # Directional Movement
             h_move = h.iloc[i] - h.iloc[i-1]
             l_move = l.iloc[i-1] - l.iloc[i]
             
@@ -41,7 +38,6 @@ class MarketConditionDetector:
         if len(tr_list) < 14:
             return 20.0
         
-        # Calculate averages
         tr_avg = sum(tr_list[-14:]) / 14
         dm_plus_avg = sum(dm_plus_list[-14:]) / 14
         dm_minus_avg = sum(dm_minus_list[-14:]) / 14
@@ -49,7 +45,6 @@ class MarketConditionDetector:
         if tr_avg == 0:
             return 20.0
         
-        # Calculate DI and DX
         di_plus = 100 * dm_plus_avg / tr_avg
         di_minus = 100 * dm_minus_avg / tr_avg
         di_sum = di_plus + di_minus
@@ -61,7 +56,7 @@ class MarketConditionDetector:
         return np.clip(dx, 0, 100)
     
     def calculate_volatility_regime(self, close: pd.Series) -> str:
-        """Calculate volatility regime using Bollinger Bands"""
+        """Calculate volatility using BB width"""
         if len(close) < self.bb_period:
             return "NORMAL"
         
@@ -74,7 +69,6 @@ class MarketConditionDetector:
         
         bb_width = (std * 2) / sma
         
-        # FIXED: Simpler volatility classification
         if bb_width > 0.04:
             return "HIGH_VOL"
         elif bb_width < 0.015:
@@ -83,12 +77,12 @@ class MarketConditionDetector:
             return "NORMAL"
     
     def detect_market_condition(self, data_1m: pd.DataFrame, data_15m: pd.DataFrame) -> Dict[str, Any]:
-        """FIXED: More permissive market condition detection"""
-        if len(data_1m) < 30 or len(data_15m) < 20:  # FIXED: Lower requirements
+        """Market condition detection"""
+        if len(data_1m) < 30 or len(data_15m) < 20:
             return {
-                "condition": "WEAK_RANGE",  # FIXED: Default to tradeable condition
+                "condition": "WEAK_RANGE",
                 "adx": 20.0, 
-                "confidence": 0.7,  # FIXED: Higher default confidence
+                "confidence": 0.7,
                 "volatility": "NORMAL",
                 "timestamp": datetime.now()
             }
@@ -96,12 +90,11 @@ class MarketConditionDetector:
         adx_15m = self.calculate_adx(data_15m['high'], data_15m['low'], data_15m['close'])
         vol_regime = self.calculate_volatility_regime(data_1m['close'])
         
-        # FIXED: More lenient condition classification
         if adx_15m < 18:
             condition, confidence = "STRONG_RANGE", 0.85
-        elif adx_15m < 30:  # FIXED: Raised from 25 to 30
+        elif adx_15m < 30:
             condition, confidence = "WEAK_RANGE", 0.75
-        elif adx_15m < 45:  # FIXED: Raised from 40 to 45
+        elif adx_15m < 45:
             condition, confidence = "TRENDING", 0.8
         else:
             condition, confidence = "STRONG_TREND", 0.9
@@ -115,37 +108,49 @@ class MarketConditionDetector:
         }
 
 class StrategyManager:
-    """FIXED: More active strategy management"""
+    """FIXED: Strategy manager with proper cooldowns"""
     
     def __init__(self):
         self.detector = MarketConditionDetector()
         self.current_strategy = None
         self.last_switch_time = None
-        self.switch_cooldown = 120  # FIXED: Reduced from 300 to 120 seconds
-        self.market_condition = {"condition": "WEAK_RANGE", "adx": 20.0}  # FIXED: Default to tradeable
+        self.last_trade_time = None  # NEW: Track last trade time
+        self.switch_cooldown = 300  # FIXED: 5 minutes between strategy switches
+        self.trade_cooldown = 600   # NEW: 10 minutes between trades
+        self.market_condition = {"condition": "WEAK_RANGE", "adx": 20.0}
         
     def should_switch_strategy(self, new_condition: str) -> bool:
-        """Determine if strategy should be switched"""
+        """Check if strategy should switch with cooldown"""
         if not self.current_strategy:
             return True
             
-        # FIXED: Shorter cooldown check
+        # FIXED: Enforce switch cooldown
         if (self.last_switch_time and 
             (datetime.now() - self.last_switch_time).total_seconds() < self.switch_cooldown):
             return False
             
-        # Strategy mapping
         current_type = "RANGE" if self.current_strategy in ["STRONG_RANGE", "WEAK_RANGE"] else "TREND"
         new_type = "RANGE" if new_condition in ["STRONG_RANGE", "WEAK_RANGE"] else "TREND"
         
         return current_type != new_type
     
+    def should_allow_new_trade(self) -> bool:
+        """NEW: Check if new trade is allowed based on cooldown"""
+        if not self.last_trade_time:
+            return True
+            
+        elapsed = (datetime.now() - self.last_trade_time).total_seconds()
+        return elapsed >= self.trade_cooldown
+    
+    def record_trade(self):
+        """NEW: Record when a trade was executed"""
+        self.last_trade_time = datetime.now()
+    
     def select_strategy(self, data_1m: pd.DataFrame, data_15m: pd.DataFrame) -> Tuple[str, Dict[str, Any]]:
-        """Select appropriate strategy based on market conditions"""
+        """Select strategy with enhanced validation"""
         market_info = self.detector.detect_market_condition(data_1m, data_15m)
         condition = market_info["condition"]
         
-        # FIXED: Always return a tradeable condition
         if condition == "INSUFFICIENT_DATA":
             market_info["condition"] = "WEAK_RANGE"
             condition = "WEAK_RANGE"
@@ -156,32 +161,48 @@ class StrategyManager:
             
         strategy_type = "RANGE" if condition in ["STRONG_RANGE", "WEAK_RANGE"] else "TREND"
         self.market_condition = market_info
+        
+        # Add cooldown info to market_info
+        market_info['trade_allowed'] = self.should_allow_new_trade()
+        market_info['trade_cooldown_remaining'] = max(0, 
+            self.trade_cooldown - (datetime.now() - self.last_trade_time).total_seconds()
+            if self.last_trade_time else 0
+        )
+        
         return strategy_type, market_info
     
     def get_position_sizing_multiplier(self, strategy_type: str, market_info: Dict[str, Any]) -> float:
-        """Get position sizing multiplier based on strategy and market conditions"""        
-        # Base multiplier by strategy and condition
+        """FIXED: More conservative position sizing"""        
+        # FIXED: Reduced base multipliers
         if strategy_type == "TREND":
-            base_multiplier = 1.3 if market_info["condition"] == "STRONG_TREND" else 1.1  # FIXED: Reduced multipliers
+            base_multiplier = 1.0 if market_info["condition"] == "STRONG_TREND" else 0.8
         else:
-            base_multiplier = 0.9 if market_info["condition"] == "STRONG_RANGE" else 1.0  # FIXED: Less conservative
+            base_multiplier = 0.7 if market_info["condition"] == "STRONG_RANGE" else 0.6
                 
         # Volatility adjustment
         volatility = market_info.get("volatility", "NORMAL")
-        vol_multipliers = {"HIGH_VOL": 0.8, "LOW_VOL": 1.1, "NORMAL": 1.0}  # FIXED: Less extreme adjustments
+        vol_multipliers = {"HIGH_VOL": 0.7, "LOW_VOL": 1.0, "NORMAL": 0.9}
         
-        return base_multiplier * vol_multipliers.get(volatility, 1.0)
+        return base_multiplier * vol_multipliers.get(volatility, 0.9)
     
     def get_strategy_info(self) -> Dict[str, Any]:
-        """Get current strategy information"""
+        """Get strategy info with cooldown status"""
         switch_cooldown_remaining = 0
         if self.last_switch_time:
             elapsed = (datetime.now() - self.last_switch_time).total_seconds()
             switch_cooldown_remaining = max(0, self.switch_cooldown - elapsed)
         
+        trade_cooldown_remaining = 0
+        if self.last_trade_time:
+            elapsed = (datetime.now() - self.last_trade_time).total_seconds()
+            trade_cooldown_remaining = max(0, self.trade_cooldown - elapsed)
+        
         return {
             "current_strategy": self.current_strategy,
             "market_condition": self.market_condition,
             "last_switch": self.last_switch_time,
-            "switch_cooldown_remaining": switch_cooldown_remaining
+            "switch_cooldown_remaining": switch_cooldown_remaining,
+            "last_trade": self.last_trade_time,
+            "trade_cooldown_remaining": trade_cooldown_remaining,
+            "next_trade_allowed": trade_cooldown_remaining == 0
         }

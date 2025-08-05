@@ -155,13 +155,22 @@ class TradeEngine:
         return df.sort_values('timestamp').set_index('timestamp')
     
     async def _generate_and_execute_signal(self):
-        """Generate and execute signals using dual strategy system"""
+        """FIXED: Generate signals with proper cooldowns"""
         strategy_type, market_info = self.strategy_manager.select_strategy(
             self.price_data_1m, self.price_data_15m
         )
         
         self.market_info = market_info
         
+        # FIXED: Check trade cooldown before generating signals
+        if not market_info.get('trade_allowed', False):
+            cooldown_remaining = market_info.get('trade_cooldown_remaining', 0)
+            if cooldown_remaining > 60:  # Only show if > 1 minute remaining
+                minutes = int(cooldown_remaining / 60)
+                print(f"⏳ Trade cooldown: {minutes}m remaining")
+            return
+        
+        # Handle strategy switching
         if self.active_strategy and self.active_strategy != strategy_type:
             await self._on_strategy_switch(self.active_strategy, strategy_type)
         
@@ -207,18 +216,19 @@ class TradeEngine:
         return True
     
     async def _execute_trade(self, signal, strategy_type, market_info):
-        """FIXED: Execute trade with proper fee-aware position sizing"""
+        """FIXED: Execute trade with correct position sizing"""
         current_price = float(self.price_data_1m['close'].iloc[-1])
         balance = await self.get_account_balance()
         
         if not balance or not self._validate_signal(signal, market_info):
             return
         
-        # Fee-aware position sizing through risk manager
+        # FIXED: Use risk manager's target position size (should be $2,381)
         base_qty = self.risk_manager.calculate_position_size(
             balance, current_price, signal['structure_stop']
         )
         
+        # FIXED: More conservative sizing multiplier
         sizing_multiplier = self.strategy_manager.get_position_sizing_multiplier(
             strategy_type, market_info
         )
@@ -227,12 +237,19 @@ class TradeEngine:
         formatted_qty = self.format_quantity(qty)
         
         if formatted_qty == "0" or float(formatted_qty) < 0.001:
+            print(f"❌ Position too small: {formatted_qty}")
             return
         
-        # Calculate actual position size for fee tracking
+        # Calculate actual position size
         position_size_usdt = float(formatted_qty) * current_price
         
-        # FIXED: Calculate break-even fees properly
+        # FIXED: Validate position size is reasonable
+        if position_size_usdt > 3000:  # Cap at $3,000
+            print(f"❌ Position too large: ${position_size_usdt:.2f}, capping at $3,000")
+            qty = 3000 / current_price
+            formatted_qty = self.format_quantity(qty)
+            position_size_usdt = float(formatted_qty) * current_price
+        
         break_even_fees = self.risk_manager.get_break_even_pnl(position_size_usdt)
         
         try:
@@ -246,17 +263,23 @@ class TradeEngine:
             )
             
             if order.get('retCode') == 0:
+                # FIXED: Record trade time for cooldown
+                self.strategy_manager.record_trade()
+                
                 self.successful_entries += 1
                 self.position_entry_price = current_price
                 self.position_size_usdt = position_size_usdt
                 
-                # Log with fee information
                 self._log_trade("ENTRY", current_price, signal=signal, quantity=formatted_qty, 
                                strategy=strategy_type, position_size_usdt=position_size_usdt,
                                break_even_fees=break_even_fees)
                                
                 await self.notifier.send_trade_entry(signal, current_price, formatted_qty, 
                                                    self._get_strategy_info())
+                
+                print(f"✅ Trade executed: {signal['action']} {formatted_qty} @ ${current_price:.2f}")
+                print(f"   Position: ${position_size_usdt:.2f} | Break-even: ${break_even_fees:.2f}")
+                
         except Exception as e:
             print(f"❌ Trade execution error: {e}")
     
@@ -457,7 +480,7 @@ class TradeEngine:
                 else self.trend_strategy.get_strategy_info())
     
     def _display_status(self):
-        """FIXED: Display enhanced status with proper fee information"""
+        """FIXED: Display with cooldown info"""
         try:
             price = float(self.price_data_1m['close'].iloc[-1])
             time = self.price_data_1m.index[-1].strftime('%H:%M:%S')
@@ -467,7 +490,7 @@ class TradeEngine:
             print("\n" * 50)
             
             w = 77
-            print(f"{'='*w}\n⚡  {symbol_display} DUAL-STRATEGY BOT (FEE-AWARE v2.0)\n{'='*w}\n")
+            print(f"{'='*w}\n⚡  {symbol_display} DUAL-STRATEGY BOT (FIXED COOLDOWNS v2.1)\n{'='*w}\n")
             
             market_condition = self.market_info.get('condition', 'UNKNOWN')
             adx = self.market_info.get('adx', 0)
@@ -476,37 +499,43 @@ class TradeEngine:
             print("🧠  MARKET ANALYSIS & STRATEGY SELECTION\n" + "─"*w)
             print(f"📊 Market Condition: {market_condition:<12} │ 📈 ADX: {adx:>5.1f} │ 🎯 Confidence: {confidence*100:>3.0f}%")
             print(f"⚙️  Active Strategy: {self.active_strategy or 'NONE':<13} │ 🕐 Timeframe: {self._get_active_timeframe()}")
+            
+            # FIXED: Show cooldown status
+            trade_cooldown = self.market_info.get('trade_cooldown_remaining', 0)
+            if trade_cooldown > 0:
+                minutes = int(trade_cooldown / 60)
+                seconds = int(trade_cooldown % 60)
+                print(f"⏳ Trade Cooldown: {minutes}m {seconds}s remaining")
+            else:
+                print("✅ Ready for new trades")
+                
             print("─"*w + "\n")
             
-            print("📋  STRATEGY STATUS (FEE-AWARE)\n" + "─"*w)
+            print("📋  STRATEGY STATUS (FIXED SIZING)\n" + "─"*w)
             if self.active_strategy == "RANGE":
                 strategy_info = self.range_strategy.get_strategy_info()
-                gross_target = self.risk_manager.range_config['gross_profit_target']
-                fee_cost = gross_target * float(self.risk_manager.fee_rate)
-                net_target = gross_target - fee_cost
+                target_size = self.risk_manager.range_config['fixed_position_usdt']
                 print(f"🎯 {strategy_info['name']}")
-                print(f"📊 Target: ${gross_target} gross → ${net_target:.2f} net (after 0.11% fees)")
+                print(f"📊 Target Position: ${target_size} (was using ${int(3750)} - FIXED)")
             else:
                 strategy_info = self.trend_strategy.get_strategy_info()
+                target_size = self.risk_manager.trend_config['fixed_position_usdt']
                 print(f"📈 {strategy_info['name']}")
-                fast_ema = strategy_info['config']['fast_ema']
-                slow_ema = strategy_info['config']['slow_ema']
-                rsi_length = strategy_info['config']['rsi_length']
-                target_mult = strategy_info['config']['target_profit_multiplier']
-                print(f"📊 RSI({rsi_length}) + EMA({fast_ema}/{slow_ema}) │ RR: 1:{target_mult} (fee-adjusted)")
+                print(f"📊 Max Position: ${target_size} (was using ${int(3750)} - FIXED)")
+                
             print("─"*w + "\n")
             
             print("📊  PERFORMANCE METRICS\n" + "─"*w)
             total_trades = sum(self.exit_reasons.values())
             total_signals = self.rejections.get('total_signals', 0)
             print(f"🔢 Total Trades: {total_trades:>3} │ 📈 Signals: {total_signals:>3} │ ✅ Accept Rate: {(total_trades/max(total_signals,1)*100):>4.1f}%")
-            print(f"📝 Check logs/trades.log for detailed fee-aware profit tracking")
+            print(f"📝 Check logs/trades.log for detailed profit tracking")
             
             print("─"*w + "\n")
             print(f"⏰ {time}   |   💰 ${price_formatted}")
             print()
             
-            # FIXED: Position info with proper fee calculations
+            # Position info
             if self.position:
                 unrealized_pnl = float(self.position.get('unrealisedPnl', 0))
                 entry = self.position_entry_price or float(self.position.get('avgPrice', 0))
@@ -515,7 +544,6 @@ class TradeEngine:
                 
                 age = (datetime.now() - self.position_start_time).total_seconds() if self.position_start_time else 0
                 
-                # FIXED: Calculate fee-aware metrics properly
                 position_size_usdt = self.position_size_usdt or (float(size) * entry)
                 break_even_fees = self.risk_manager.get_break_even_pnl(position_size_usdt)
                 net_pnl = unrealized_pnl - break_even_fees
@@ -525,7 +553,7 @@ class TradeEngine:
                 print(f"   Gross PnL: ${unrealized_pnl:.2f} │ Fees: ${break_even_fees:.2f} │ Net: ${net_pnl:.2f}")
                 print(f"   Age: {age:.1f}s │ Max Hold: {self.risk_manager.get_max_position_time()}s")
             else:
-                print("⚡  No Position — Fee-Aware Scanner Active (0.11% cost factored)")
+                print("⚡  No Position — FIXED Scanner Active (10min cooldowns)")
             
             print("─" * 60)
             
